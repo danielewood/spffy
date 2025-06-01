@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -26,22 +27,44 @@ import (
 )
 
 var (
-	cpuprofile      = flag.String("cpuprofile", "", "write cpu profile to file")
-	logLevel        = flag.String("loglevel", "INFO", "log level: NONE, INFO, DEBUG, TRACE")
-	logFile         = flag.String("logfile", "", "write JSON logs to file (default: stdout)")
-	compress        = flag.Bool("compress", false, "compress replies")
-	tsig            = flag.String("tsig", "", "use SHA256 hmac tsig: keyname:base64")
-	soreuseport     = flag.Int("soreuseport", 0, "number of server instances to start with SO_REUSEPORT (0 to disable)")
-	cpu             = flag.Int("cpu", 0, "number of cpu to use")
-	baseDomain      = flag.String("basedomain", "_spf-stage.spffy.dev", "base domain for SPF macro queries")
-	cacheLimit      = flag.Int64("cachelimit", 1024*1024*1024, "cache memory limit in bytes (default: 1GB)")
-	dnsServers      = flag.String("dnsservers", "", "comma-separated list of DNS servers to use for lookups (default: system resolver)")
-	voidLookupLimit = flag.Uint("voidlookuplimit", 20, "maximum number of void DNS lookups allowed during SPF evaluation")
-	cacheTTL        = flag.Int("cachettl", 15, "cache TTL for SPF results in seconds")
-	maxConcurrent   = flag.Int("maxconcurrent", 1000, "maximum concurrent SPF lookups")
-	metricsPort     = flag.Int("metricsport", 8080, "port for metrics server")
-	logger          *Logger
+	logger *Logger
 )
+
+// Settings holds all configurable settings
+type Settings struct {
+	CPUProfile      string `json:"cpuprofile"`
+	LogLevel        string `json:"loglevel"`
+	LogFile         string `json:"logfile"`
+	Compress        bool   `json:"compress"`
+	TSIG            string `json:"tsig"`
+	SOReusePort     int    `json:"soreuseport"`
+	CPU             int    `json:"cpu"`
+	BaseDomain      string `json:"basedomain"`
+	CacheLimit      int64  `json:"cachelimit"`
+	DNSServers      string `json:"dnsservers"`
+	VoidLookupLimit uint   `json:"voidlookuplimit"`
+	CacheTTL        int    `json:"cachettl"`
+	MaxConcurrent   int    `json:"maxconcurrent"`
+	MetricsPort     int    `json:"metricsport"`
+}
+
+// flags holds the command-line flags
+type flags struct {
+	cpuprofile      *string
+	logLevel        *string
+	logFile         *string
+	compress        *bool
+	tsig            *string
+	soreuseport     *int
+	cpu             *int
+	baseDomain      *string
+	cacheLimit      *int64
+	dnsServers      *string
+	voidLookupLimit *uint
+	cacheTTL        *int
+	maxConcurrent   *int
+	metricsPort     *int
+}
 
 // LogLevel defines the possible logging levels
 type LogLevel int
@@ -387,48 +410,48 @@ func envUint(envKey string, defaultValue uint) uint {
 	return defaultValue
 }
 
-func loadEnvConfig() {
+func loadEnvConfig(f *flags) {
 	if !isFlagSet("cpuprofile") {
-		*cpuprofile = envString("SPFFY_CPUPROFILE", *cpuprofile)
+		*f.cpuprofile = envString("SPFFY_CPUPROFILE", *f.cpuprofile)
 	}
 	if !isFlagSet("loglevel") {
-		*logLevel = envString("SPFFY_LOGLEVEL", *logLevel)
+		*f.logLevel = envString("SPFFY_LOGLEVEL", *f.logLevel)
 	}
 	if !isFlagSet("logfile") {
-		*logFile = envString("SPFFY_LOGFILE", *logFile)
+		*f.logFile = envString("SPFFY_LOGFILE", *f.logFile)
 	}
 	if !isFlagSet("compress") {
-		*compress = envBool("SPFFY_COMPRESS", *compress)
+		*f.compress = envBool("SPFFY_COMPRESS", *f.compress)
 	}
 	if !isFlagSet("tsig") {
-		*tsig = envString("SPFFY_TSIG", *tsig)
+		*f.tsig = envString("SPFFY_TSIG", *f.tsig)
 	}
 	if !isFlagSet("soreuseport") {
-		*soreuseport = envInt("SPFFY_SOREUSEPORT", *soreuseport)
+		*f.soreuseport = envInt("SPFFY_SOREUSEPORT", *f.soreuseport)
 	}
 	if !isFlagSet("cpu") {
-		*cpu = envInt("SPFFY_CPU", *cpu)
+		*f.cpu = envInt("SPFFY_CPU", *f.cpu)
 	}
 	if !isFlagSet("basedomain") {
-		*baseDomain = envString("SPFFY_BASEDOMAIN", *baseDomain)
+		*f.baseDomain = envString("SPFFY_BASEDOMAIN", *f.baseDomain)
 	}
 	if !isFlagSet("cachelimit") {
-		*cacheLimit = envInt64("SPFFY_CACHELIMIT", *cacheLimit)
+		*f.cacheLimit = envInt64("SPFFY_CACHELIMIT", *f.cacheLimit)
 	}
 	if !isFlagSet("dnsservers") {
-		*dnsServers = envString("SPFFY_DNSSERVERS", *dnsServers)
+		*f.dnsServers = envString("SPFFY_DNSSERVERS", *f.dnsServers)
 	}
 	if !isFlagSet("voidlookuplimit") {
-		*voidLookupLimit = envUint("SPFFY_VOIDLOOKUPLIMIT", *voidLookupLimit)
+		*f.voidLookupLimit = envUint("SPFFY_VOIDLOOKUPLIMIT", *f.voidLookupLimit)
 	}
 	if !isFlagSet("cachettl") {
-		*cacheTTL = envInt("SPFFY_CACHETTL", *cacheTTL)
+		*f.cacheTTL = envInt("SPFFY_CACHETTL", *f.cacheTTL)
 	}
 	if !isFlagSet("maxconcurrent") {
-		*maxConcurrent = envInt("SPFFY_MAXCONCURRENT", *maxConcurrent)
+		*f.maxConcurrent = envInt("SPFFY_MAXCONCURRENT", *f.maxConcurrent)
 	}
 	if !isFlagSet("metricsport") {
-		*metricsPort = envInt("SPFFY_METRICSPORT", *metricsPort)
+		*f.metricsPort = envInt("SPFFY_METRICSPORT", *f.metricsPort)
 	}
 }
 
@@ -442,15 +465,15 @@ func isFlagSet(name string) bool {
 	return found
 }
 
-func setupResolverPool() {
+func setupResolverPool(dnsServers string) {
 	resolvers = &resolverPool{}
 
-	if *dnsServers == "" {
+	if dnsServers == "" {
 		resolvers.resolvers = []*net.Resolver{net.DefaultResolver}
 		return
 	}
 
-	servers := strings.Split(*dnsServers, ",")
+	servers := strings.Split(dnsServers, ",")
 	for _, server := range servers {
 		server = strings.TrimSpace(server)
 		if server == "" {
@@ -523,7 +546,7 @@ func (c *dnsCache) evictOldest() {
 	}
 }
 
-func (c *dnsCache) get(key string) (*cacheEntry, bool) {
+func (c *dnsCache) get(key string, f *flags) (*cacheEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -531,7 +554,7 @@ func (c *dnsCache) get(key string) (*cacheEntry, bool) {
 	if !exists {
 		c.totalMisses++
 		cacheMissesTotal.Inc()
-		c.updateCacheMetrics()
+		c.updateCacheMetrics(f)
 		return nil, false
 	}
 
@@ -540,19 +563,19 @@ func (c *dnsCache) get(key string) (*cacheEntry, bool) {
 		delete(c.cache, key)
 		c.totalMisses++
 		cacheMissesTotal.Inc()
-		c.updateCacheMetrics()
+		c.updateCacheMetrics(f)
 		return nil, false
 	}
 
 	entry.hits++
 	c.totalHits++
 	cacheHitsTotal.Inc()
-	c.updateCacheMetrics()
+	c.updateCacheMetrics(f)
 
 	return entry, true
 }
 
-func (c *dnsCache) set(key string, spfRecord string, found bool) {
+func (c *dnsCache) set(key string, spfRecord string, found bool, f *flags) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -567,7 +590,7 @@ func (c *dnsCache) set(key string, spfRecord string, found bool) {
 
 	entry := &cacheEntry{
 		spfRecord: spfRecord,
-		expiry:    time.Now().Add(time.Duration(*cacheTTL) * time.Second),
+		expiry:    time.Now().Add(time.Duration(*f.cacheTTL) * time.Second),
 		found:     found,
 		size:      size,
 		hits:      0,
@@ -576,14 +599,14 @@ func (c *dnsCache) set(key string, spfRecord string, found bool) {
 	c.cache[key] = entry
 	c.totalSize += size
 	c.evictOldest()
-	c.updateCacheMetrics()
+	c.updateCacheMetrics(f)
 
 	cacheEntries.Set(float64(len(c.cache)))
 	cacheSizeBytes.Set(float64(c.totalSize))
 	cacheLimitBytes.Set(float64(c.limit))
 }
 
-func (c *dnsCache) cleanup() {
+func (c *dnsCache) cleanup(f *flags) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -598,10 +621,10 @@ func (c *dnsCache) cleanup() {
 	cacheEntries.Set(float64(len(c.cache)))
 	cacheSizeBytes.Set(float64(c.totalSize))
 	cacheLimitBytes.Set(float64(c.limit))
-	c.updateCacheMetrics()
+	c.updateCacheMetrics(f)
 }
 
-func (c *dnsCache) updateCacheMetrics() {
+func (c *dnsCache) updateCacheMetrics(f *flags) {
 	if c.totalHits+c.totalMisses > 0 {
 		cacheHitRatio.Set(float64(c.totalHits) / float64(c.totalHits+c.totalMisses))
 	} else {
@@ -614,7 +637,7 @@ func (c *dnsCache) updateCacheMetrics() {
 	var mostUsedKey string
 
 	for key, entry := range c.cache {
-		age := now.Sub(entry.expiry.Add(-time.Duration(*cacheTTL) * time.Second))
+		age := now.Sub(entry.expiry.Add(-time.Duration(*f.cacheTTL) * time.Second))
 		if oldestAge == 0 || age > oldestAge {
 			oldestAge = age
 		}
@@ -638,7 +661,7 @@ func (c *dnsCache) getStats() (entries int, totalSize int64, limit int64) {
 	return len(c.cache), c.totalSize, c.limit
 }
 
-func runCacheCleanup() {
+func runCacheCleanup(f *flags) {
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -646,14 +669,14 @@ func runCacheCleanup() {
 		for {
 			select {
 			case <-ticker.C:
-				cache.cleanup()
+				cache.cleanup(f)
 			}
 		}
 	}()
 }
 
-func configureLogger(logBuffer *LogBuffer) {
-	logger = NewLogger(*logLevel, *logFile, logBuffer)
+func configureLogger(logBuffer *LogBuffer, logLevel, logFile string) {
+	logger = NewLogger(logLevel, logFile, logBuffer)
 }
 
 func logQueryResponse(r *dns.Msg, m *dns.Msg, clientAddr string, extraData map[string]interface{}) {
@@ -694,9 +717,9 @@ func logQueryResponse(r *dns.Msg, m *dns.Msg, clientAddr string, extraData map[s
 	}
 }
 
-func extractSPFComponents(queryName string) (ip, version, domain string, valid bool) {
+func extractSPFComponents(queryName string, f *flags) (ip, version, domain string, valid bool) {
 	queryName = strings.TrimSuffix(queryName, ".")
-	baseDomainSuffix := "." + *baseDomain
+	baseDomainSuffix := "." + *f.baseDomain
 	if !strings.HasSuffix(queryName, baseDomainSuffix) {
 		return "", "", "", false
 	}
@@ -767,7 +790,7 @@ func extractSPFComponents(queryName string) (ip, version, domain string, valid b
 	return reconstructedIP, versionType, domain, true
 }
 
-func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
+func processDNSQuery(w dns.ResponseWriter, r *dns.Msg, f *flags) {
 	startTime := time.Now()
 	concurrentQueries.Inc()
 	defer concurrentQueries.Dec()
@@ -779,7 +802,7 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 
 	m := new(dns.Msg)
 	m.SetReply(r)
-	m.Compress = *compress
+	m.Compress = *f.compress
 
 	clientAddr := w.RemoteAddr().String()
 	queryName := r.Question[0].Name
@@ -802,7 +825,7 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 	queryName = strings.ToLower(queryName)
 
 	queryNameTrimmed := strings.TrimSuffix(queryName, ".")
-	baseDomainSuffix := "." + *baseDomain
+	baseDomainSuffix := "." + *f.baseDomain
 	if !strings.HasSuffix(queryNameTrimmed, baseDomainSuffix) {
 		extraData["reject"] = "wrong_domain"
 		extraData["expected"] = baseDomainSuffix
@@ -813,7 +836,7 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	ip, _, domain, valid := extractSPFComponents(queryName)
+	ip, _, domain, valid := extractSPFComponents(queryName, f)
 
 	if valid {
 		extraData["ip"] = ip
@@ -822,7 +845,7 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 
 		cacheKey := fmt.Sprintf("%s|%s", ip, domain)
 
-		if cachedEntry, found := cache.get(cacheKey); found {
+		if cachedEntry, found := cache.get(cacheKey, f); found {
 			extraData["cache"] = "hit"
 			queryTotal.WithLabelValues("success", "hit").Inc()
 			if cachedEntry.found {
@@ -880,7 +903,7 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 				opts := []spf.Option{
 					spf.WithResolver(trackingRes),
 					spf.WithContext(ctx),
-					spf.OverrideVoidLookupLimit(*voidLookupLimit),
+					spf.OverrideVoidLookupLimit(*f.voidLookupLimit),
 				}
 
 				lookupStart := time.Now()
@@ -906,8 +929,8 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 				selectedResolver := resolvers.getResolver()
 				var resolverAddr string
 				if len(resolvers.resolvers) > 0 && selectedResolver != net.DefaultResolver {
-					if *dnsServers != "" {
-						servers := strings.Split(*dnsServers, ",")
+					if *f.dnsServers != "" {
+						servers := strings.Split(*f.dnsServers, ",")
 						if len(servers) > 0 {
 							resolverAddr = strings.TrimSpace(servers[0])
 							if !strings.Contains(resolverAddr, ":") {
@@ -983,7 +1006,7 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 					resultFound = false
 				}
 
-				cache.set(cacheKey, spfRecord, resultFound)
+				cache.set(cacheKey, spfRecord, resultFound, f)
 
 				if resultFound {
 					t := &dns.TXT{
@@ -1040,7 +1063,7 @@ func startDNSServer(net, name, secret string, soreuseport bool) {
 	}
 }
 
-func startMetricsServer(logBuffer *LogBuffer) {
+func startMetricsServer(logBuffer *LogBuffer, f *flags) {
 	prometheus.MustRegister(cacheEntries)
 	prometheus.MustRegister(cacheSizeBytes)
 	prometheus.MustRegister(cacheLimitBytes)
@@ -1057,7 +1080,7 @@ func startMetricsServer(logBuffer *LogBuffer) {
 	prometheus.MustRegister(cacheHitsTotal)
 	prometheus.MustRegister(cacheMissesTotal)
 
-	cacheLimitBytes.Set(float64(*cacheLimit))
+	cacheLimitBytes.Set(float64(*f.cacheLimit))
 
 	http.Handle("/metrics", promhttp.Handler())
 	http.HandleFunc("/logs", func(w http.ResponseWriter, r *http.Request) {
@@ -1089,29 +1112,73 @@ func startMetricsServer(logBuffer *LogBuffer) {
 <html>
 <head>
     <title>SPFFY Logs</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/monokai-sublime.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
     <style>
-        body { font-family: monospace; margin: 20px; }
-        #logs { white-space: pre-wrap; background: #f0f0f0; padding: 10px; max-height: 80vh; overflow-y: auto; }
+        body { background-color: #1a202c; color: #e2e8f0; }
+        #logs { max-height: calc(100vh - 80px); overflow-y: auto; }
+        .log-entry { border-bottom: 1px solid #4a5568; }
+        pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
+        .toggle-button { position: fixed; top: 10px; right: 10px; }
     </style>
 </head>
-<body>
-    <h1>SPFFY Logs</h1>
-    <div id="logs"></div>
+<body class="p-4">
+    <button id="toggleFormat" class="toggle-button bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded">Toggle Format</button>
+    <div id="logs" class="bg-gray-800 rounded-lg p-4"></div>
     <script>
         const logs = document.getElementById('logs');
-        const source = new EventSource('/logs?stream=true');
-        source.onmessage = function(event) {
+        const toggleButton = document.getElementById('toggleFormat');
+        let isFormatted = false;
+        let source = null;
+
+        function connectSource() {
+            if (source) {
+                source.close();
+            }
+            source = new EventSource('/logs?stream=true');
+            source.onmessage = function(event) {
+                if (!event.data.trim()) return;
+                addLog(event.data);
+            };
+            source.onerror = function() {
+                source.close();
+                const div = document.createElement('div');
+                div.className = 'log-entry p-2 text-red-400';
+                div.textContent = 'Connection lost. Please refresh to reconnect.';
+                logs.appendChild(div);
+            };
+        }
+
+        function formatLog(log) {
+            try {
+                const parsed = JSON.parse(log);
+                return isFormatted ? JSON.stringify(parsed, null, 2) : JSON.stringify(parsed);
+            } catch (e) {
+                return log;
+            }
+        }
+
+        function addLog(log) {
             const div = document.createElement('div');
-            div.textContent = event.data;
+            div.className = 'log-entry p-2';
+            const pre = document.createElement('pre');
+            pre.innerHTML = hljs.highlight(formatLog(log), { language: 'json' }).value;
+            div.appendChild(pre);
             logs.appendChild(div);
             logs.scrollTop = logs.scrollHeight;
-        };
-        source.onerror = function() {
-            source.close();
-            const div = document.createElement('div');
-            div.textContent = 'Connection lost. Please refresh to reconnect.';
-            logs.appendChild(div);
-        };
+        }
+
+        toggleButton.addEventListener('click', () => {
+            isFormatted = !isFormatted;
+            logs.innerHTML = '';
+            toggleButton.textContent = isFormatted ? 'Raw JSON' : 'Formatted JSON';
+            connectSource();
+        });
+
+        connectSource();
     </script>
 </body>
 </html>
@@ -1119,7 +1186,149 @@ func startMetricsServer(logBuffer *LogBuffer) {
 		}
 	})
 
-	addr := fmt.Sprintf(":%d", *metricsPort)
+	http.HandleFunc("/settings", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			settings := Settings{
+				CPUProfile:      *f.cpuprofile,
+				LogLevel:        *f.logLevel,
+				LogFile:         *f.logFile,
+				Compress:        *f.compress,
+				TSIG:            *f.tsig,
+				SOReusePort:     *f.soreuseport,
+				CPU:             *f.cpu,
+				BaseDomain:      *f.baseDomain,
+				CacheLimit:      *f.cacheLimit,
+				DNSServers:      *f.dnsServers,
+				VoidLookupLimit: *f.voidLookupLimit,
+				CacheTTL:        *f.cacheTTL,
+				MaxConcurrent:   *f.maxConcurrent,
+				MetricsPort:     *f.metricsPort,
+			}
+			w.Header().Set("Content-Type", "application/json")
+			enc := json.NewEncoder(w)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(settings); err != nil {
+				http.Error(w, "Failed to encode settings", http.StatusInternalServerError)
+				return
+			}
+
+		case http.MethodPost:
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "Failed to read request body", http.StatusBadRequest)
+				return
+			}
+
+			var newSettings Settings
+			if err := json.Unmarshal(body, &newSettings); err != nil {
+				http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+				return
+			}
+
+			// Validate settings
+			switch strings.ToUpper(newSettings.LogLevel) {
+			case "NONE", "INFO", "DEBUG", "TRACE":
+			default:
+				http.Error(w, "Invalid loglevel: must be NONE, INFO, DEBUG, or TRACE", http.StatusBadRequest)
+				return
+			}
+			if newSettings.CacheTTL < 0 {
+				http.Error(w, "CacheTTL must be non-negative", http.StatusBadRequest)
+				return
+			}
+			if newSettings.CacheLimit < 0 {
+				http.Error(w, "CacheLimit must be non-negative", http.StatusBadRequest)
+				return
+			}
+			if newSettings.MaxConcurrent <= 0 {
+				http.Error(w, "MaxConcurrent must be positive", http.StatusBadRequest)
+				return
+			}
+			if newSettings.MetricsPort <= 0 {
+				http.Error(w, "MetricsPort must be positive", http.StatusBadRequest)
+				return
+			}
+			if newSettings.SOReusePort < 0 {
+				http.Error(w, "SOReusePort must be non-negative", http.StatusBadRequest)
+				return
+			}
+			if newSettings.CPU < 0 {
+				http.Error(w, "CPU must be non-negative", http.StatusBadRequest)
+				return
+			}
+
+			// Check for settings requiring restart
+			restartRequired := false
+			messages := []string{}
+			if newSettings.SOReusePort != *f.soreuseport {
+				restartRequired = true
+				messages = append(messages, "SOReusePort change requires program restart")
+			}
+			if newSettings.MetricsPort != *f.metricsPort {
+				restartRequired = true
+				messages = append(messages, "MetricsPort change requires program restart")
+			}
+			if newSettings.CPU != *f.cpu {
+				restartRequired = true
+				messages = append(messages, "CPU change requires program restart")
+			}
+
+			// Update settings
+			*f.cpuprofile = newSettings.CPUProfile
+			*f.logLevel = newSettings.LogLevel
+			*f.logFile = newSettings.LogFile
+			*f.compress = newSettings.Compress
+			*f.tsig = newSettings.TSIG
+			*f.soreuseport = newSettings.SOReusePort
+			*f.cpu = newSettings.CPU
+			*f.baseDomain = newSettings.BaseDomain
+			*f.cacheLimit = newSettings.CacheLimit
+			*f.dnsServers = newSettings.DNSServers
+			*f.voidLookupLimit = newSettings.VoidLookupLimit
+			*f.cacheTTL = newSettings.CacheTTL
+			*f.maxConcurrent = newSettings.MaxConcurrent
+			*f.metricsPort = newSettings.MetricsPort
+
+			// Reinitialize components
+			configureLogger(logBuffer, *f.logLevel, *f.logFile)
+			cache.mu.Lock()
+			cache.limit = *f.cacheLimit
+			cache.evictOldest()
+			cache.mu.Unlock()
+			cacheLimitBytes.Set(float64(*f.cacheLimit))
+			setupResolverPool(*f.dnsServers)
+			spfSemaphore = make(chan struct{}, *f.maxConcurrent)
+
+			// Log update
+			response := map[string]interface{}{
+				"status":  "updated",
+				"message": "Settings updated successfully",
+			}
+			if restartRequired {
+				response["status"] = "updated_with_restart_required"
+				response["message"] = "Some settings updated, but restart required for: " + strings.Join(messages, ", ")
+			}
+			logger.Info(map[string]interface{}{
+				"message":  "Settings updated via /settings",
+				"settings": newSettings,
+				"restart":  restartRequired,
+			})
+
+			w.Header().Set("Content-Type", "application/json")
+			enc := json.NewEncoder(w)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(response); err != nil {
+				http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+				return
+			}
+
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	addr := fmt.Sprintf(":%d", *f.metricsPort)
 	go func() {
 		if err := http.ListenAndServe(addr, nil); err != nil {
 			logger.Info(map[string]interface{}{
@@ -1128,35 +1337,52 @@ func startMetricsServer(logBuffer *LogBuffer) {
 		}
 	}()
 	logger.Info(map[string]interface{}{
-		"message": fmt.Sprintf("Metrics and logs server started on port %d", *metricsPort),
+		"message": fmt.Sprintf("Metrics, logs, and settings server started on port %d", *f.metricsPort),
 	})
 
 	go logBuffer.Broadcast()
 }
 
-func printConfig() {
+func printConfig(f *flags) {
 	logger.Info(map[string]interface{}{
 		"message": "Configuration",
 		"config": map[string]interface{}{
-			"SPFFY_CPUPROFILE":      *cpuprofile,
-			"SPFFY_LOGLEVEL":        *logLevel,
-			"SPFFY_LOGFILE":         *logFile,
-			"SPFFY_COMPRESS":        *compress,
-			"SPFFY_TSIG":            *tsig,
-			"SPFFY_SOREUSEPORT":     *soreuseport,
-			"SPFFY_CPU":             *cpu,
-			"SPFFY_BASEDOMAIN":      *baseDomain,
-			"SPFFY_CACHELIMIT":      *cacheLimit,
-			"SPFFY_DNSSERVERS":      *dnsServers,
-			"SPFFY_VOIDLOOKUPLIMIT": *voidLookupLimit,
-			"SPFFY_CACHETTL":        *cacheTTL,
-			"SPFFY_MAXCONCURRENT":   *maxConcurrent,
-			"SPFFY_METRICSPORT":     *metricsPort,
+			"SPFFY_CPUPROFILE":      *f.cpuprofile,
+			"SPFFY_LOGLEVEL":        *f.logLevel,
+			"SPFFY_LOGFILE":         *f.logFile,
+			"SPFFY_COMPRESS":        *f.compress,
+			"SPFFY_TSIG":            *f.tsig,
+			"SPFFY_SOREUSEPORT":     *f.soreuseport,
+			"SPFFY_CPU":             *f.cpu,
+			"SPFFY_BASEDOMAIN":      *f.baseDomain,
+			"SPFFY_CACHELIMIT":      *f.cacheLimit,
+			"SPFFY_DNSSERVERS":      *f.dnsServers,
+			"SPFFY_VOIDLOOKUPLIMIT": *f.voidLookupLimit,
+			"SPFFY_CACHETTL":        *f.cacheTTL,
+			"SPFFY_MAXCONCURRENT":   *f.maxConcurrent,
+			"SPFFY_METRICSPORT":     *f.metricsPort,
 		},
 	})
 }
 
 func main() {
+	f := &flags{
+		cpuprofile:      flag.String("cpuprofile", "", "write cpu profile to file"),
+		logLevel:        flag.String("loglevel", "INFO", "log level: NONE, INFO, DEBUG, TRACE"),
+		logFile:         flag.String("logfile", "", "write JSON logs to file (default: stdout)"),
+		compress:        flag.Bool("compress", false, "compress replies"),
+		tsig:            flag.String("tsig", "", "use SHA256 hmac tsig: keyname:base64"),
+		soreuseport:     flag.Int("soreuseport", 0, "number of server instances to start with SO_REUSEPORT (0 to disable)"),
+		cpu:             flag.Int("cpu", 0, "number of cpu to use"),
+		baseDomain:      flag.String("basedomain", "_spf-stage.spffy.dev", "base domain for SPF macro queries"),
+		cacheLimit:      flag.Int64("cachelimit", 1024*1024*1024, "cache memory limit in bytes (default: 1GB)"),
+		dnsServers:      flag.String("dnsservers", "", "comma-separated list of DNS servers to use for lookups (default: system resolver)"),
+		voidLookupLimit: flag.Uint("voidlookuplimit", 20, "maximum number of void DNS lookups allowed during SPF evaluation"),
+		cacheTTL:        flag.Int("cachettl", 15, "cache TTL for SPF results in seconds"),
+		maxConcurrent:   flag.Int("maxconcurrent", 1000, "maximum concurrent SPF lookups"),
+		metricsPort:     flag.Int("metricsport", 8080, "port for metrics server"),
+	}
+
 	var name, secret string
 	flag.Usage = func() {
 		flag.PrintDefaults()
@@ -1176,60 +1402,65 @@ func main() {
 		fmt.Println("  Example: SPFFY_SOREUSEPORT=4 starts 4 TCP and 4 UDP servers.")
 		fmt.Println("\nLogs Endpoint:")
 		fmt.Println("  Access /logs on the metrics port to view streaming logs in the browser.")
+		fmt.Println("\nSettings Endpoint:")
+		fmt.Println("  GET /settings to view current settings as JSON.")
+		fmt.Println("  POST /settings with JSON to update settings dynamically.")
 	}
 	flag.Parse()
 
-	loadEnvConfig()
+	loadEnvConfig(f)
 
 	logBuffer := NewLogBuffer(1000)
-	configureLogger(logBuffer)
+	configureLogger(logBuffer, *f.logLevel, *f.logFile)
 
-	printConfig()
+	printConfig(f)
 
-	if *tsig != "" {
-		a := strings.SplitN(*tsig, ":", 2)
+	if *f.tsig != "" {
+		a := strings.SplitN(*f.tsig, ":", 2)
 		name, secret = dns.Fqdn(a[0]), a[1]
 	}
-	if *cpuprofile != "" {
-		f, err := os.Create(*cpuprofile)
+	if *f.cpuprofile != "" {
+		file, err := os.Create(*f.cpuprofile)
 		if err != nil {
 			logger.Info(map[string]interface{}{
 				"error": fmt.Sprintf("Failed to create CPU profile: %v", err),
 			})
 			os.Exit(1)
 		}
-		pprof.StartCPUProfile(f)
+		pprof.StartCPUProfile(file)
 		defer pprof.StopCPUProfile()
 	}
 
-	cache.limit = *cacheLimit
+	cache.limit = *f.cacheLimit
 
-	setupResolverPool()
+	setupResolverPool(*f.dnsServers)
 
 	if logger.level >= LevelDebug {
-		if *dnsServers == "" {
+		if *f.dnsServers == "" {
 			logger.Debug(map[string]interface{}{
 				"message": "Using system resolver",
 			})
 		} else {
 			logger.Debug(map[string]interface{}{
-				"message": fmt.Sprintf("Using DNS servers: %s (load balanced)", *dnsServers),
+				"message": fmt.Sprintf("Using DNS servers: %s (load balanced)", *f.dnsServers),
 			})
 		}
 	}
 
-	spfSemaphore = make(chan struct{}, *maxConcurrent)
+	spfSemaphore = make(chan struct{}, *f.maxConcurrent)
 
-	runCacheCleanup()
+	runCacheCleanup(f)
 
-	startMetricsServer(logBuffer)
+	startMetricsServer(logBuffer, f)
 
-	if *cpu != 0 {
-		runtime.GOMAXPROCS(*cpu)
+	if *f.cpu != 0 {
+		runtime.GOMAXPROCS(*f.cpu)
 	}
-	dns.HandleFunc(".", processDNSQuery)
-	if *soreuseport > 0 {
-		for i := 0; i < *soreuseport; i++ {
+	dns.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		processDNSQuery(w, r, f)
+	})
+	if *f.soreuseport > 0 {
+		for i := 0; i < *f.soreuseport; i++ {
 			go startDNSServer("tcp", name, secret, true)
 			go startDNSServer("udp", name, secret, true)
 		}
