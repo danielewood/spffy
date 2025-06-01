@@ -515,6 +515,7 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 	queryName := r.Question[0].Name
 	extraData := make(map[string]interface{})
 
+	// Check query type first
 	if r.Question[0].Qtype != dns.TypeTXT {
 		extraData["reject"] = "non_txt"
 		extraData["type"] = dns.TypeToString[r.Question[0].Qtype]
@@ -524,6 +525,10 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
+	// Convert query name to lowercase to handle Google's random-caps queries
+	queryName = strings.ToLower(queryName)
+
+	// Proceed with the rest of the processing
 	queryNameTrimmed := strings.TrimSuffix(queryName, ".")
 	baseDomainSuffix := "." + *baseDomain
 	if !strings.HasSuffix(queryNameTrimmed, baseDomainSuffix) {
@@ -550,7 +555,7 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 				extraData["result"] = "pass"
 				t := &dns.TXT{
 					Hdr: dns.RR_Header{
-						Name:   r.Question[0].Name,
+						Name:   r.Question[0].Name, // Keep original case for response
 						Rrtype: dns.TypeTXT,
 						Class:  dns.ClassINET,
 						Ttl:    15,
@@ -704,7 +709,7 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 				if resultFound {
 					t := &dns.TXT{
 						Hdr: dns.RR_Header{
-							Name:   r.Question[0].Name,
+							Name:   r.Question[0].Name, // Keep original case for response
 							Rrtype: dns.TypeTXT,
 							Class:  dns.ClassINET,
 							Ttl:    300,
