@@ -46,10 +46,10 @@ jobs:
             runner: ubuntu-latest
             build_type: "debug"
           - platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-24.04-arm # Corrected ARM runner
             build_type: "release"
           - platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-24.04-arm # Corrected ARM runner
             build_type: "debug"
     runs-on: ${{ matrix.runner }}
     steps:
@@ -75,8 +75,6 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
-          # For pushes to main (release and debug)
-          # For version tags (release and debug)
           tags: |
             # Release build tags
             type=sha,prefix=,enable=${{ matrix.build_type == 'release' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -93,7 +91,7 @@ jobs:
         with:
           context: .
           push: true
-          platform: ${{ matrix.platform }}
+          platforms: ${{ matrix.platform }} # Corrected to 'platforms'
           build-args: |
             BUILD_MODE=${{ matrix.build_type }}
           tags: ${{ steps.meta.outputs.tags }}
