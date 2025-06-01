@@ -30,7 +30,7 @@ var (
 	tsig            = flag.String("tsig", "", "use SHA256 hmac tsig: keyname:base64")
 	soreuseport     = flag.Int("soreuseport", 0, "use SO_REUSE_PORT")
 	cpu             = flag.Int("cpu", 0, "number of cpu to use")
-	baseDomain      = flag.String("basedomain", "spf.spffy.dev", "base domain for SPF macro queries")
+	baseDomain      = flag.String("basedomain", "_spf-stage.spffy.dev", "base domain for SPF macro queries")
 	cacheLimit      = flag.Int64("cachelimit", 1024*1024*1024, "cache memory limit in bytes (default: 1GB)")
 	dnsServers      = flag.String("dnsservers", "", "comma-separated list of DNS servers to use for lookups (default: system resolver)")
 	voidLookupLimit = flag.Uint("voidlookuplimit", 20, "maximum number of void DNS lookups allowed during SPF evaluation")
@@ -397,8 +397,9 @@ func logQueryResponse(r *dns.Msg, m *dns.Msg, clientAddr string, extraData map[s
 		Debug      map[string]interface{} `json:"debug,omitempty"`
 	}
 
+	// Use lowercase query name for the log
 	query := queryInfo{
-		Name: r.Question[0].Name,
+		Name: strings.ToLower(r.Question[0].Name),
 		Type: dns.TypeToString[r.Question[0].Qtype],
 	}
 
@@ -514,6 +515,11 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 	clientAddr := w.RemoteAddr().String()
 	queryName := r.Question[0].Name
 	extraData := make(map[string]interface{})
+
+	// Store the original query name in debug data
+	if *debugEnabled {
+		extraData["raw_query"] = queryName
+	}
 
 	// Check query type first
 	if r.Question[0].Qtype != dns.TypeTXT {
