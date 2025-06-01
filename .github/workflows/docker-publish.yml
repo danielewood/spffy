@@ -3,6 +3,7 @@ name: Docker Image CI
 on:
   push:
     branches: [ "main" ]
+    tags: [ "v*.*.*" ] # Handle tag pushes
   workflow_dispatch: # Allow manual trigger
 
 permissions:
@@ -26,15 +27,10 @@ jobs:
         uses: mathieudutour/github-tag-action@v6.1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          default_bump: "patch" # Or "minor", "major" based on preference or commit message analysis if action supports it
-          # release_branches: "main" # Ensure it only tags on main branch pushes if action supports it
+          default_bump: "patch" # Or "minor", "major"
 
   build_and_push:
-    needs: determine_version # Ensure versioning happens first on main branch pushes
-    # This job will run on pushes to main (after determine_version)
-    # OR when a new version tag is pushed directly (which determine_version creates)
-    # The condition below handles running EITHER after 'determine_version' on a main push,
-    # OR if the event is a tag push (v*.*.*)
+    needs: determine_version
     if: always() && (needs.determine_version.result == 'success' || startsWith(github.ref, 'refs/tags/v'))
     strategy:
       matrix:
@@ -46,18 +42,17 @@ jobs:
             runner: ubuntu-latest
             build_type: "debug"
           - platform: linux/arm64
-            runner: ubuntu-24.04-arm # Corrected ARM runner
+            runner: ubuntu-24.04-arm
             build_type: "release"
           - platform: linux/arm64
-            runner: ubuntu-24.04-arm # Corrected ARM runner
+            runner: ubuntu-24.04-arm
             build_type: "debug"
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        # If triggered by tag, checkout the tag itself
         with:
-          ref: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.determine_version.outputs.new_tag || github.ref }}
+          ref: ${{ github.ref }}
 
       - name: Set up Docker Buildx
         id: buildx
@@ -79,11 +74,13 @@ jobs:
             # Release build tags
             type=sha,prefix=,enable=${{ matrix.build_type == 'release' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
             type=raw,value=latest,enable=${{ matrix.build_type == 'release' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ needs.determine_version.outputs.new_tag }},enable=${{ matrix.build_type == 'release' && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.determine_version.outputs.new_tag != '' }}
             type=ref,event=tag,enable=${{ matrix.build_type == 'release' && startsWith(github.ref, 'refs/tags/v') }}
 
             # Debug build tags
             type=sha,prefix=,suffix=-debug,enable=${{ matrix.build_type == 'debug' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
             type=raw,value=latest-debug,enable=${{ matrix.build_type == 'debug' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ needs.determine_version.outputs.new_tag }}-debug,enable=${{ matrix.build_type == 'debug' && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.determine_version.outputs.new_tag != '' }}
             type=ref,event=tag,suffix=-debug,enable=${{ matrix.build_type == 'debug' && startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Build and push Docker image
@@ -91,10 +88,11 @@ jobs:
         with:
           context: .
           push: true
-          platforms: ${{ matrix.platform }} # Corrected to 'platforms'
+          platforms: ${{ matrix.platform }}
           build-args: |
             BUILD_MODE=${{ matrix.build_type }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          platform: ${{ matrix.platform }} # Explicitly set platform
