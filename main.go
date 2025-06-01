@@ -37,6 +37,8 @@ var (
 	cacheLimit      = flag.Int64("cachelimit", 1024*1024*1024, "cache memory limit in bytes (default: 1GB)")
 	dnsServer       = flag.String("dnsserver", "8.8.8.8:53", "DNS server to use for lookups")
 	voidLookupLimit = flag.Uint("voidlookuplimit", 20, "maximum number of void DNS lookups allowed during SPF evaluation")
+	cacheTTL        = flag.Duration("cachettl", 15*time.Second, "cache TTL for SPF results")
+	maxConcurrent   = flag.Int("maxconcurrent", 1000, "maximum concurrent SPF lookups")
 	logger          *log.Logger
 )
 
@@ -59,6 +61,35 @@ type dnsCache struct {
 var cache = &dnsCache{
 	cache: make(map[string]*cacheEntry),
 	limit: 1024 * 1024 * 1024, // 1GB default, will be updated from flag
+}
+
+// Semaphore to limit concurrent SPF lookups
+var spfSemaphore chan struct{}
+
+// trackingResolver wraps a resolver to count DNS lookups
+type trackingResolver struct {
+	resolver *net.Resolver
+	count    *int
+}
+
+func (tr *trackingResolver) LookupTXT(ctx context.Context, name string) ([]string, error) {
+	*tr.count++
+	return tr.resolver.LookupTXT(ctx, name)
+}
+
+func (tr *trackingResolver) LookupMX(ctx context.Context, name string) ([]*net.MX, error) {
+	*tr.count++
+	return tr.resolver.LookupMX(ctx, name)
+}
+
+func (tr *trackingResolver) LookupAddr(ctx context.Context, addr string) ([]string, error) {
+	*tr.count++
+	return tr.resolver.LookupAddr(ctx, addr)
+}
+
+func (tr *trackingResolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+	*tr.count++
+	return tr.resolver.LookupIPAddr(ctx, host)
 }
 
 // estimateSize calculates the approximate memory usage of a cache entry
@@ -131,7 +162,7 @@ func (c *dnsCache) get(key string) (*cacheEntry, bool) {
 	return entry, true
 }
 
-// set stores an entry in the cache with a 15-second expiry
+// set stores an entry in the cache with configurable expiry
 func (c *dnsCache) set(key string, spfRecord string, found bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -152,7 +183,7 @@ func (c *dnsCache) set(key string, spfRecord string, found bool) {
 	// Add new entry
 	entry := &cacheEntry{
 		spfRecord: spfRecord,
-		expiry:    time.Now().Add(15 * time.Second),
+		expiry:    time.Now().Add(*cacheTTL),
 		found:     found,
 		size:      size,
 	}
@@ -398,26 +429,22 @@ func handleReflect(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	// Now do the actual SPF macro parsing and processing
-	ip, version, domain, valid := parseSPFMacro(queryName)
+	ip, _, domain, valid := parseSPFMacro(queryName)
 
 	if valid {
-		// Add parsed components to extra data
-		extraData["parsed_ip"] = ip
-		extraData["parsed_version"] = version
-		extraData["parsed_domain"] = domain
-
-		// Look up SPF for _spffy.{domain}
-		spfDomain := fmt.Sprintf("_spffy.%s", domain)
-		extraData["spf_domain"] = spfDomain
+		// Add parsed components to debug data
+		extraData["ip"] = ip
+		extraData["domain"] = domain
+		extraData["spf_domain"] = fmt.Sprintf("_spffy.%s", domain)
 
 		// Create cache key combining IP and domain
-		cacheKey := fmt.Sprintf("%s|%s", ip, spfDomain)
+		cacheKey := fmt.Sprintf("%s|%s", ip, domain)
 
 		// Check cache first
 		if cachedEntry, found := cache.get(cacheKey); found {
-			extraData["cache_hit"] = true
+			extraData["cache"] = "hit"
 			if cachedEntry.found {
-				extraData["spf_result"] = "pass"
+				extraData["result"] = "pass"
 				// Create TXT record with the cached SPF result
 				t := &dns.TXT{
 					Hdr: dns.RR_Header{
@@ -430,27 +457,42 @@ func handleReflect(w dns.ResponseWriter, r *dns.Msg) {
 				}
 				m.Answer = append(m.Answer, t)
 			} else {
-				extraData["spf_result"] = "fail"
-				extraData["lookup_source"] = "cache"
+				extraData["result"] = "fail"
 				m.SetRcode(r, dns.RcodeNameError)
 			}
 		} else {
 			// Cache miss, perform SPF lookup
-			extraData["cache_hit"] = false
+			extraData["cache"] = "miss"
+
+			// Acquire semaphore to limit concurrent SPF lookups
+			select {
+			case spfSemaphore <- struct{}{}:
+				// Got semaphore, proceed with lookup
+				defer func() { <-spfSemaphore }()
+			case <-time.After(1 * time.Second):
+				// Timeout waiting for semaphore - too many concurrent lookups
+				extraData["error"] = "too_many_concurrent_lookups"
+				extraData["result"] = "temperror"
+				m.SetRcode(r, dns.RcodeServerFailure)
+				logDNSMessage(r, m, clientAddr, extraData)
+				w.WriteMsg(m)
+				return
+			}
 
 			// Parse IP address
 			ipAddr := net.ParseIP(ip)
 			if ipAddr == nil {
-				extraData["spf_error"] = "invalid_ip_address"
-				extraData["spf_result"] = "error"
+				extraData["error"] = "invalid_ip"
+				extraData["result"] = "error"
 				m.SetRcode(r, dns.RcodeServerFailure)
 			} else {
-				// Perform SPF check with custom resolver
+				spfDomain := fmt.Sprintf("_spffy.%s", domain)
+
+				// Create custom resolver with DNS lookup tracking
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 
-				// Create custom resolver
-				resolver := &net.Resolver{
+				baseResolver := &net.Resolver{
 					PreferGo: true,
 					Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 						d := net.Dialer{Timeout: 5 * time.Second}
@@ -458,8 +500,15 @@ func handleReflect(w dns.ResponseWriter, r *dns.Msg) {
 					},
 				}
 
+				// Track DNS lookup count
+				lookupCount := 0
+				trackingRes := &trackingResolver{
+					resolver: baseResolver,
+					count:    &lookupCount,
+				}
+
 				opts := []spf.Option{
-					spf.WithResolver(resolver),
+					spf.WithResolver(trackingRes),
 					spf.WithContext(ctx),
 					spf.OverrideVoidLookupLimit(*voidLookupLimit),
 				}
@@ -468,30 +517,12 @@ func handleReflect(w dns.ResponseWriter, r *dns.Msg) {
 				result, spfErr := spf.CheckHostWithSender(ipAddr, spfDomain, fmt.Sprintf("test@%s", spfDomain), opts...)
 				spfDuration := time.Since(startTime)
 
-				extraData["spf_duration_ms"] = spfDuration.Milliseconds()
+				extraData["duration_ms"] = spfDuration.Milliseconds()
+				extraData["dns_lookups"] = lookupCount
 
-				// Convert result to string manually
-				var resultString string
-				switch result {
-				case spf.Pass:
-					resultString = "Pass"
-				case spf.Fail:
-					resultString = "Fail"
-				case spf.SoftFail:
-					resultString = "SoftFail"
-				case spf.Neutral:
-					resultString = "Neutral"
-				case spf.None:
-					resultString = "None"
-				case spf.TempError:
-					resultString = "TempError"
-				case spf.PermError:
-					resultString = "PermError"
-				default:
-					resultString = "Unknown"
+				if spfErr != nil {
+					extraData["error"] = spfErr.Error()
 				}
-
-				extraData["spf_raw_result"] = resultString
 
 				// Also try to get the original SPF record to detect fail type
 				var originalFailType string = "~all" // default to softfail
@@ -514,16 +545,11 @@ func handleReflect(w dns.ResponseWriter, r *dns.Msg) {
 								} else {
 									originalFailType = "~all" // fallback for ~all, ?all, +all, or undefined
 								}
-								extraData["original_spf_record"] = spfRecord
-								extraData["detected_fail_type"] = originalFailType
+								extraData["fail_type"] = originalFailType
 								break
 							}
 						}
 					}
-				}
-
-				if spfErr != nil {
-					extraData["spf_error"] = spfErr.Error()
 				}
 
 				// Generate appropriate SPF record based on result
@@ -539,26 +565,26 @@ func handleReflect(w dns.ResponseWriter, r *dns.Msg) {
 						// IPv6 - use detected fail type from original record
 						spfRecord = fmt.Sprintf("v=spf1 ip6:%s %s", ip, originalFailType)
 					}
-					extraData["spf_result"] = "pass"
+					extraData["result"] = "pass"
 					resultFound = true
 				case spf.Fail:
 					spfRecord = fmt.Sprintf("v=spf1 %s", originalFailType)
-					extraData["spf_result"] = "fail"
+					extraData["result"] = "fail"
 					resultFound = false
 				case spf.SoftFail:
 					spfRecord = "v=spf1 ~all"
-					extraData["spf_result"] = "softfail"
+					extraData["result"] = "softfail"
 					resultFound = false
 				case spf.Neutral:
 					spfRecord = "v=spf1 ?all"
-					extraData["spf_result"] = "neutral"
+					extraData["result"] = "neutral"
 					resultFound = false
 				case spf.None:
 					spfRecord = fmt.Sprintf("v=spf1 %s", originalFailType)
-					extraData["spf_result"] = "none"
+					extraData["result"] = "none"
 					resultFound = false
 				case spf.TempError:
-					extraData["spf_result"] = "temperror"
+					extraData["result"] = "temperror"
 					m.SetRcode(r, dns.RcodeServerFailure)
 					// Don't cache temporary errors
 					logDNSMessage(r, m, clientAddr, extraData)
@@ -566,11 +592,11 @@ func handleReflect(w dns.ResponseWriter, r *dns.Msg) {
 					return
 				case spf.PermError:
 					spfRecord = fmt.Sprintf("v=spf1 %s", originalFailType)
-					extraData["spf_result"] = "permerror"
+					extraData["result"] = "permerror"
 					resultFound = false
 				default:
 					spfRecord = fmt.Sprintf("v=spf1 %s", originalFailType)
-					extraData["spf_result"] = "unknown"
+					extraData["result"] = "unknown"
 					resultFound = false
 				}
 
@@ -596,7 +622,7 @@ func handleReflect(w dns.ResponseWriter, r *dns.Msg) {
 		}
 	} else {
 		// Invalid SPF macro format
-		extraData["reject_reason"] = "invalid_spf_macro_format"
+		extraData["reject"] = "invalid_format"
 		m.SetRcode(r, dns.RcodeNameError)
 	}
 
@@ -653,6 +679,9 @@ func main() {
 
 	// Set cache limit from flag
 	cache.limit = *cacheLimit
+
+	// Initialize semaphore for limiting concurrent SPF lookups
+	spfSemaphore = make(chan struct{}, *maxConcurrent)
 
 	// Start cache cleanup routine
 	startCacheCleanup()
