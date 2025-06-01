@@ -167,8 +167,8 @@ jobs:
           VERSIONS=$(gh api \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            /orgs/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/versions \
-            --jq '.[] | select(.metadata.container.tags[] | test("latest-amd64|latest-arm64|latest-debug-amd64|latest-debug-arm64|${{ needs.determine_version.outputs.new_tag }}-amd64|${{ needs.determine_version.outputs.new_tag }}-arm64|${{ needs.determine_version.outputs.new_tag }}-debug-amd64|${{ needs.determine_version.outputs.new_tag }}-debug-arm64")) | .id')
+            /users/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/versions \
+            --jq '.[] | select(.metadata.container.tags[] | test("^(latest-amd64|latest-arm64|latest-debug-amd64|latest-debug-arm64|${{ needs.determine_version.outputs.new_tag }}-amd64|${{ needs.determine_version.outputs.new_tag }}-arm64|${{ needs.determine_version.outputs.new_tag }}-debug-amd64|${{ needs.determine_version.outputs.new_tag }}-debug-arm64)$")) | .id')
 
           # Delete each version
           for VERSION_ID in $VERSIONS; do
@@ -177,7 +177,7 @@ jobs:
               -X DELETE \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              /orgs/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/versions/${VERSION_ID} || echo "Failed to delete version ${VERSION_ID}, continuing..."
+              /users/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/versions/${VERSION_ID} || echo "Failed to delete version ${VERSION_ID}, continuing..."
           done
 
       - name: Delete architecture-specific tags for tag push
@@ -192,8 +192,8 @@ jobs:
           VERSIONS=$(gh api \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            /orgs/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/versions \
-            --jq '.[] | select(.metadata.container.tags[] | test("${{ github.ref_name }}-amd64|${{ github.ref_name }}-arm64|${{ github.ref_name }}-debug-amd64|${{ github.ref_name }}-debug-arm64")) | .id')
+            /users/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/versions \
+            --jq '.[] | select(.metadata.container.tags[] | test("^(${{ github.ref_name }}-amd64|${{ github.ref_name }}-arm64|${{ github.ref_name }}-debug-amd64|${{ github.ref_name }}-debug-arm64)$")) | .id')
 
           # Delete each version
           for VERSION_ID in $VERSIONS; do
@@ -202,5 +202,5 @@ jobs:
               -X DELETE \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              /orgs/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/versions/${VERSION_ID} || echo "Failed to delete version ${VERSION_ID}, continuing..."
+              /users/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/versions/${VERSION_ID} || echo "Failed to delete version ${VERSION_ID}, continuing..."
           done
