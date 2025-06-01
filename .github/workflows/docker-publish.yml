@@ -155,6 +155,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gh
 
+      - name: Determine repository owner type
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OWNER_TYPE=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/${{ github.repository }} \
+            --jq '.owner.type')
+          echo "OWNER_TYPE=${OWNER_TYPE}" >> $GITHUB_ENV
+          echo "Determined owner type: ${OWNER_TYPE}"
+
       - name: Delete architecture-specific tags for main branch push
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
@@ -163,12 +175,19 @@ jobs:
           # Get package name (lowercase repository name)
           PACKAGE_NAME=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]' | cut -d'/' -f2)
           
+          # Set API endpoint based on owner type
+          if [ "${{ env.OWNER_TYPE }}" = "User" ]; then
+            API_ENDPOINT="/users/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/versions"
+          else
+            API_ENDPOINT="/orgs/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/versions"
+          fi
+          
           # Get package versions with architecture-specific tags
           VERSIONS=$(gh api \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            /users/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/versions \
-            --jq '.[] | select(.metadata.container.tags[] | test("^(latest-amd64|latest-arm64|latest-debug-amd64|latest-debug-arm64|${{ needs.determine_version.outputs.new_tag }}-amd64|${{ needs.determine_version.outputs.new_tag }}-arm64|${{ needs.determine_version.outputs.new_tag }}-debug-amd64|${{ needs.determine_version.outputs.new_tag }}-debug-arm64)$")) | .id')
+            ${API_ENDPOINT} \
+            --jq '.[] | select(.metadata.container.tags[] | test("-(amd64|arm64)$")) | .id')
 
           # Delete each version
           for VERSION_ID in $VERSIONS; do
@@ -177,7 +196,7 @@ jobs:
               -X DELETE \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              /users/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/versions/${VERSION_ID} || echo "Failed to delete version ${VERSION_ID}, continuing..."
+              ${API_ENDPOINT}/${VERSION_ID} || echo "Failed to delete version ${VERSION_ID}, continuing..."
           done
 
       - name: Delete architecture-specific tags for tag push
@@ -188,12 +207,19 @@ jobs:
           # Get package name (lowercase repository name)
           PACKAGE_NAME=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]' | cut -d'/' -f2)
           
+          # Set API endpoint based on owner type
+          if [ "${{ env.OWNER_TYPE }}" = "User" ]; then
+            API_ENDPOINT="/users/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/versions"
+          else
+            API_ENDPOINT="/orgs/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/versions"
+          fi
+          
           # Get package versions with architecture-specific tags
           VERSIONS=$(gh api \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            /users/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/versions \
-            --jq '.[] | select(.metadata.container.tags[] | test("^(${{ github.ref_name }}-amd64|${{ github.ref_name }}-arm64|${{ github.ref_name }}-debug-amd64|${{ github.ref_name }}-debug-arm64)$")) | .id')
+            ${API_ENDPOINT} \
+            --jq '.[] | select(.metadata.container.tags[] | test("-(amd64|arm64)$")) | .id')
 
           # Delete each version
           for VERSION_ID in $VERSIONS; do
@@ -202,5 +228,5 @@ jobs:
               -X DELETE \
               -H "Accept: application/vnd.github+json" \
               -H "X-GitHub-Api-Version: 2022-11-28" \
-              /users/${{ github.repository_owner }}/packages/container/${PACKAGE_NAME}/versions/${VERSION_ID} || echo "Failed to delete version ${VERSION_ID}, continuing..."
+              ${API_ENDPOINT}/${VERSION_ID} || echo "Failed to delete version ${VERSION_ID}, continuing..."
           done
