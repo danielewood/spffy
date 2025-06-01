@@ -26,17 +26,18 @@ import (
 )
 
 var (
-	cpuprofile  = flag.String("cpuprofile", "", "write cpu profile to file")
-	logEnabled  = flag.Bool("print", false, "enable JSON logging of queries and responses")
-	logFile     = flag.String("logfile", "", "write JSON logs to file (default: stdout)")
-	compress    = flag.Bool("compress", false, "compress replies")
-	tsig        = flag.String("tsig", "", "use SHA256 hmac tsig: keyname:base64")
-	soreuseport = flag.Int("soreuseport", 0, "use SO_REUSE_PORT")
-	cpu         = flag.Int("cpu", 0, "number of cpu to use")
-	baseDomain  = flag.String("basedomain", "spf.spffy.dev", "base domain for SPF macro queries")
-	cacheLimit  = flag.Int64("cachelimit", 1024*1024*1024, "cache memory limit in bytes (default: 1GB)")
-	dnsServer   = flag.String("dnsserver", "8.8.8.8:53", "DNS server to use for lookups")
-	logger      *log.Logger
+	cpuprofile      = flag.String("cpuprofile", "", "write cpu profile to file")
+	logEnabled      = flag.Bool("print", false, "enable JSON logging of queries and responses")
+	logFile         = flag.String("logfile", "", "write JSON logs to file (default: stdout)")
+	compress        = flag.Bool("compress", false, "compress replies")
+	tsig            = flag.String("tsig", "", "use SHA256 hmac tsig: keyname:base64")
+	soreuseport     = flag.Int("soreuseport", 0, "use SO_REUSE_PORT")
+	cpu             = flag.Int("cpu", 0, "number of cpu to use")
+	baseDomain      = flag.String("basedomain", "spf.spffy.dev", "base domain for SPF macro queries")
+	cacheLimit      = flag.Int64("cachelimit", 1024*1024*1024, "cache memory limit in bytes (default: 1GB)")
+	dnsServer       = flag.String("dnsserver", "8.8.8.8:53", "DNS server to use for lookups")
+	voidLookupLimit = flag.Uint("voidlookuplimit", 20, "maximum number of void DNS lookups allowed during SPF evaluation")
+	logger          *log.Logger
 )
 
 // cacheEntry represents a cached SPF result
@@ -460,6 +461,7 @@ func handleReflect(w dns.ResponseWriter, r *dns.Msg) {
 				opts := []spf.Option{
 					spf.WithResolver(resolver),
 					spf.WithContext(ctx),
+					spf.OverrideVoidLookupLimit(*voidLookupLimit),
 				}
 
 				startTime := time.Now()
