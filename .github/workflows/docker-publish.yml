@@ -127,10 +127,10 @@ jobs:
               ghcr.io/${{ github.repository }}:${{ github.ref_name }}-debug-amd64 \
               ghcr.io/${{ github.repository }}:${{ github.ref_name }}-debug-arm64
           fi
-      - name: Install GitHub CLI
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gh
+      # - name: Install GitHub CLI
+      #   run: |
+      #     sudo apt-get update
+      #     sudo apt-get install -y gh
       - name: Determine repository owner type
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -171,5 +171,5 @@ jobs:
         with:
           app_id: ${{ vars.SPFFY_STAGE_APP_ID }}
           api_key: ${{ secrets.BUNNYNET_API_KEY }}
-          container: app
+          container: spffy
           image_tag: ${{ github.event_name == 'push' && needs.determine_version.outputs.new_tag || github.ref_name }}
