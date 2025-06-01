@@ -1,4 +1,4 @@
-module github.com/danielewod/spffy
+module github.com/danielewood/spffy
 
 go 1.24.3
 

@@ -1,7 +1,7 @@
 // Package main implements a name server that responds to TXT queries for any domain
 // with a specific SPF record. All other query types receive an NXDOMAIN response.
 // Logs queries and responses in JSON format when enabled.
-// Module: github.com/danielewod/spffy
+// Module: github.com/danielewood/spffy
 
 package main
 
