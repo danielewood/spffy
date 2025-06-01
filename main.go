@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -20,6 +21,8 @@ import (
 
 	"blitiri.com.ar/go/spf"
 	"github.com/miekg/dns"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
@@ -36,6 +39,7 @@ var (
 	voidLookupLimit = flag.Uint("voidlookuplimit", 20, "maximum number of void DNS lookups allowed during SPF evaluation")
 	cacheTTL        = flag.Duration("cachettl", 15*time.Second, "cache TTL for SPF results")
 	maxConcurrent   = flag.Int("maxconcurrent", 1000, "maximum concurrent SPF lookups")
+	metricsPort     = flag.Int("metricsport", 8080, "port for metrics server")
 	logger          *log.Logger
 )
 
@@ -46,7 +50,6 @@ type resolverPool struct {
 
 func (rp *resolverPool) getResolver() *net.Resolver {
 	if len(rp.resolvers) == 0 {
-		// Fallback to system resolver
 		return net.DefaultResolver
 	}
 	index := atomic.AddUint64(&rp.counter, 1) % uint64(len(rp.resolvers))
@@ -75,6 +78,49 @@ var cache = &dnsCache{
 }
 
 var spfSemaphore chan struct{}
+
+// Prometheus metrics
+var (
+	cacheEntries = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "spffy_cache_entries",
+		Help: "Number of entries in the SPF cache",
+	})
+	cacheSizeBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "spffy_cache_size_bytes",
+		Help: "Total size of cache entries in bytes",
+	})
+	cacheLimitBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "spffy_cache_limit_bytes",
+		Help: "Cache size limit in bytes",
+	})
+	queryTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "spffy_queries_total",
+		Help: "Total number of DNS queries processed",
+	}, []string{"result", "cache"})
+	lookupDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "spffy_spf_lookup_duration_seconds",
+		Help:    "SPF lookup duration in seconds",
+		Buckets: prometheus.DefBuckets,
+	})
+	dnsLookups = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "spffy_dns_lookups_per_query",
+		Help:    "Number of DNS lookups per SPF query",
+		Buckets: []float64{0, 1, 2, 3, 4, 5, 10, 20, 30, 40, 50},
+	})
+	queryResponseTime = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "spffy_query_response_time_seconds",
+		Help:    "DNS query response time in seconds",
+		Buckets: prometheus.DefBuckets,
+	})
+	requestsPerSecond = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "spffy_requests_total",
+		Help: "Total number of DNS requests received",
+	})
+	concurrentQueries = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "spffy_concurrent_queries",
+		Help: "Number of concurrent DNS queries being processed",
+	})
+)
 
 type trackingResolver struct {
 	resolver *net.Resolver
@@ -193,6 +239,9 @@ func loadEnvConfig() {
 	if !isFlagSet("maxconcurrent") {
 		*maxConcurrent = envInt("SPFFY_MAXCONCURRENT", *maxConcurrent)
 	}
+	if !isFlagSet("metricsport") {
+		*metricsPort = envInt("SPFFY_METRICSPORT", *metricsPort)
+	}
 }
 
 func isFlagSet(name string) bool {
@@ -209,7 +258,6 @@ func setupResolverPool() {
 	resolvers = &resolverPool{}
 
 	if *dnsServers == "" {
-		// Use system resolver if no specific servers are configured
 		resolvers.resolvers = []*net.Resolver{net.DefaultResolver}
 		return
 	}
@@ -237,7 +285,6 @@ func setupResolverPool() {
 	}
 
 	if len(resolvers.resolvers) == 0 {
-		// Fallback to system resolver if parsing failed
 		resolvers.resolvers = []*net.Resolver{net.DefaultResolver}
 	}
 }
@@ -298,7 +345,6 @@ func (c *dnsCache) get(key string) (*cacheEntry, bool) {
 	}
 
 	if time.Now().After(entry.expiry) {
-		// Entry expired, but we'll clean it up later
 		return nil, false
 	}
 
@@ -312,7 +358,6 @@ func (c *dnsCache) set(key string, spfRecord string, found bool) {
 	size := calcEntrySize(key, spfRecord)
 
 	if size > c.limit {
-		// Entry too large, don't cache it
 		return
 	}
 
@@ -331,6 +376,11 @@ func (c *dnsCache) set(key string, spfRecord string, found bool) {
 	c.totalSize += size
 
 	c.evictOldest()
+
+	// Update Prometheus metrics
+	cacheEntries.Set(float64(len(c.cache)))
+	cacheSizeBytes.Set(float64(c.totalSize))
+	cacheLimitBytes.Set(float64(c.limit))
 }
 
 func (c *dnsCache) cleanup() {
@@ -344,6 +394,11 @@ func (c *dnsCache) cleanup() {
 			delete(c.cache, key)
 		}
 	}
+
+	// Update Prometheus metrics
+	cacheEntries.Set(float64(len(c.cache)))
+	cacheSizeBytes.Set(float64(c.totalSize))
+	cacheLimitBytes.Set(float64(c.limit))
 }
 
 func (c *dnsCache) getStats() (entries int, totalSize int64, limit int64) {
@@ -397,7 +452,6 @@ func logQueryResponse(r *dns.Msg, m *dns.Msg, clientAddr string, extraData map[s
 		Debug      map[string]interface{} `json:"debug,omitempty"`
 	}
 
-	// Use lowercase query name for the log
 	query := queryInfo{
 		Name: strings.ToLower(r.Question[0].Name),
 		Type: dns.TypeToString[r.Question[0].Qtype],
@@ -508,6 +562,15 @@ func extractSPFComponents(queryName string) (ip, version, domain string, valid b
 }
 
 func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
+	startTime := time.Now()
+	concurrentQueries.Inc()
+	defer concurrentQueries.Dec()
+	defer func() {
+		queryResponseTime.Observe(time.Since(startTime).Seconds())
+	}()
+
+	requestsPerSecond.Inc()
+
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.Compress = *compress
@@ -516,31 +579,29 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 	queryName := r.Question[0].Name
 	extraData := make(map[string]interface{})
 
-	// Store the original query name in debug data
 	if *debugEnabled {
 		extraData["raw_query"] = queryName
 	}
 
-	// Check query type first
 	if r.Question[0].Qtype != dns.TypeTXT {
 		extraData["reject"] = "non_txt"
 		extraData["type"] = dns.TypeToString[r.Question[0].Qtype]
 		m.SetRcode(r, dns.RcodeNameError)
+		queryTotal.WithLabelValues("non_txt", "miss").Inc()
 		logQueryResponse(r, m, clientAddr, extraData)
 		w.WriteMsg(m)
 		return
 	}
 
-	// Convert query name to lowercase to handle Google's random-caps queries
 	queryName = strings.ToLower(queryName)
 
-	// Proceed with the rest of the processing
 	queryNameTrimmed := strings.TrimSuffix(queryName, ".")
 	baseDomainSuffix := "." + *baseDomain
 	if !strings.HasSuffix(queryNameTrimmed, baseDomainSuffix) {
 		extraData["reject"] = "wrong_domain"
 		extraData["expected"] = baseDomainSuffix
 		m.SetRcode(r, dns.RcodeNameError)
+		queryTotal.WithLabelValues("wrong_domain", "miss").Inc()
 		logQueryResponse(r, m, clientAddr, extraData)
 		w.WriteMsg(m)
 		return
@@ -557,11 +618,12 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 
 		if cachedEntry, found := cache.get(cacheKey); found {
 			extraData["cache"] = "hit"
+			queryTotal.WithLabelValues("success", "hit").Inc()
 			if cachedEntry.found {
 				extraData["result"] = "pass"
 				t := &dns.TXT{
 					Hdr: dns.RR_Header{
-						Name:   r.Question[0].Name, // Keep original case for response
+						Name:   r.Question[0].Name,
 						Rrtype: dns.TypeTXT,
 						Class:  dns.ClassINET,
 						Ttl:    15,
@@ -583,6 +645,7 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 				extraData["error"] = "too_many_concurrent_lookups"
 				extraData["result"] = "temperror"
 				m.SetRcode(r, dns.RcodeServerFailure)
+				queryTotal.WithLabelValues("temperror", "miss").Inc()
 				logQueryResponse(r, m, clientAddr, extraData)
 				w.WriteMsg(m)
 				return
@@ -593,6 +656,7 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 				extraData["error"] = "invalid_ip"
 				extraData["result"] = "error"
 				m.SetRcode(r, dns.RcodeServerFailure)
+				queryTotal.WithLabelValues("invalid_ip", "miss").Inc()
 			} else {
 				spfDomain := fmt.Sprintf("_spffy.%s", domain)
 
@@ -613,9 +677,11 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 					spf.OverrideVoidLookupLimit(*voidLookupLimit),
 				}
 
-				startTime := time.Now()
+				lookupStart := time.Now()
 				result, spfErr := spf.CheckHostWithSender(ipAddr, spfDomain, fmt.Sprintf("test@%s", spfDomain), opts...)
-				spfDuration := time.Since(startTime)
+				spfDuration := time.Since(lookupStart)
+				lookupDuration.Observe(spfDuration.Seconds())
+				dnsLookups.Observe(float64(lookupCount))
 
 				extraData["duration_ms"] = spfDuration.Milliseconds()
 				extraData["dns_lookups"] = lookupCount
@@ -697,6 +763,7 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 				case spf.TempError:
 					extraData["result"] = "temperror"
 					m.SetRcode(r, dns.RcodeServerFailure)
+					queryTotal.WithLabelValues("temperror", "miss").Inc()
 					logQueryResponse(r, m, clientAddr, extraData)
 					w.WriteMsg(m)
 					return
@@ -715,7 +782,7 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 				if resultFound {
 					t := &dns.TXT{
 						Hdr: dns.RR_Header{
-							Name:   r.Question[0].Name, // Keep original case for response
+							Name:   r.Question[0].Name,
 							Rrtype: dns.TypeTXT,
 							Class:  dns.ClassINET,
 							Ttl:    300,
@@ -723,14 +790,17 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 						Txt: []string{spfRecord},
 					}
 					m.Answer = append(m.Answer, t)
+					queryTotal.WithLabelValues("success", "miss").Inc()
 				} else {
 					m.SetRcode(r, dns.RcodeNameError)
+					queryTotal.WithLabelValues(extraData["result"].(string), "miss").Inc()
 				}
 			}
 		}
 	} else {
 		extraData["reject"] = "invalid_format"
 		m.SetRcode(r, dns.RcodeNameError)
+		queryTotal.WithLabelValues("invalid_format", "miss").Inc()
 	}
 
 	if r.IsTsig() != nil {
@@ -761,6 +831,32 @@ func startDNSServer(net, name, secret string, soreuseport bool) {
 	}
 }
 
+func startMetricsServer() {
+	// Register Prometheus metrics
+	prometheus.MustRegister(cacheEntries)
+	prometheus.MustRegister(cacheSizeBytes)
+	prometheus.MustRegister(cacheLimitBytes)
+	prometheus.MustRegister(queryTotal)
+	prometheus.MustRegister(lookupDuration)
+	prometheus.MustRegister(dnsLookups)
+	prometheus.MustRegister(queryResponseTime)
+	prometheus.MustRegister(requestsPerSecond)
+	prometheus.MustRegister(concurrentQueries)
+
+	// Set initial cache limit metric
+	cacheLimitBytes.Set(float64(*cacheLimit))
+
+	// Start HTTP server for Prometheus metrics
+	http.Handle("/metrics", promhttp.Handler())
+	addr := fmt.Sprintf(":%d", *metricsPort)
+	go func() {
+		if err := http.ListenAndServe(addr, nil); err != nil {
+			fmt.Printf("Failed to start metrics server: %s\n", err.Error())
+		}
+	}()
+	fmt.Printf("Metrics server started on port %d\n", *metricsPort)
+}
+
 func main() {
 	var name, secret string
 	flag.Usage = func() {
@@ -770,7 +866,7 @@ func main() {
 		fmt.Println("  SPFFY_CPUPROFILE, SPFFY_DEBUG, SPFFY_LOGFILE, SPFFY_COMPRESS,")
 		fmt.Println("  SPFFY_TSIG, SPFFY_SOREUSEPORT, SPFFY_CPU, SPFFY_BASEDOMAIN,")
 		fmt.Println("  SPFFY_CACHELIMIT, SPFFY_DNSSERVERS, SPFFY_VOIDLOOKUPLIMIT,")
-		fmt.Println("  SPFFY_CACHETTL, SPFFY_MAXCONCURRENT")
+		fmt.Println("  SPFFY_CACHETTL, SPFFY_MAXCONCURRENT, SPFFY_METRICSPORT")
 		fmt.Println("\nDNS Servers:")
 		fmt.Println("  Use comma-separated list for multiple servers (load balanced).")
 		fmt.Println("  Example: SPFFY_DNSSERVERS=8.8.8.8:53,1.1.1.1:53,9.9.9.9:53")
@@ -810,6 +906,8 @@ func main() {
 	spfSemaphore = make(chan struct{}, *maxConcurrent)
 
 	runCacheCleanup()
+
+	startMetricsServer()
 
 	if *cpu != 0 {
 		runtime.GOMAXPROCS(*cpu)
