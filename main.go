@@ -63,13 +63,16 @@ type cacheEntry struct {
 	expiry    time.Time
 	found     bool
 	size      int64
+	hits      uint64 // Track hits per entry
 }
 
 type dnsCache struct {
-	mu        sync.RWMutex
-	cache     map[string]*cacheEntry
-	totalSize int64
-	limit     int64
+	mu          sync.RWMutex
+	cache       map[string]*cacheEntry
+	totalSize   int64
+	limit       int64
+	totalHits   uint64
+	totalMisses uint64
 }
 
 var cache = &dnsCache{
@@ -119,6 +122,30 @@ var (
 	concurrentQueries = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "spffy_concurrent_queries",
 		Help: "Number of concurrent DNS queries being processed",
+	})
+	cacheHitRatio = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "spffy_cache_hit_ratio",
+		Help: "Ratio of cache hits to total queries",
+	})
+	cacheOldestEntryAge = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "spffy_cache_oldest_entry_age_seconds",
+		Help: "Age of the oldest cache entry in seconds",
+	})
+	cacheYoungestEntryAge = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "spffy_cache_youngest_entry_age_seconds",
+		Help: "Age of the youngest cache entry in seconds",
+	})
+	cacheMostUsedEntry = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "spffy_cache_most_used_entry",
+		Help: "Number of hits for the most used cache entry",
+	}, []string{"key"})
+	cacheHitsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "spffy_cache_hits_total",
+		Help: "Total number of cache hits",
+	})
+	cacheMissesTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "spffy_cache_misses_total",
+		Help: "Total number of cache misses",
 	})
 )
 
@@ -336,17 +363,30 @@ func (c *dnsCache) evictOldest() {
 }
 
 func (c *dnsCache) get(key string) (*cacheEntry, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock() // Using Lock instead of RLock to update hits
+	defer c.mu.Unlock()
 
 	entry, exists := c.cache[key]
 	if !exists {
+		c.totalMisses++
+		cacheMissesTotal.Inc()
+		c.updateCacheMetrics()
 		return nil, false
 	}
 
 	if time.Now().After(entry.expiry) {
+		c.totalSize -= entry.size
+		delete(c.cache, key)
+		c.totalMisses++
+		cacheMissesTotal.Inc()
+		c.updateCacheMetrics()
 		return nil, false
 	}
+
+	entry.hits++
+	c.totalHits++
+	cacheHitsTotal.Inc()
+	c.updateCacheMetrics()
 
 	return entry, true
 }
@@ -356,7 +396,6 @@ func (c *dnsCache) set(key string, spfRecord string, found bool) {
 	defer c.mu.Unlock()
 
 	size := calcEntrySize(key, spfRecord)
-
 	if size > c.limit {
 		return
 	}
@@ -370,14 +409,14 @@ func (c *dnsCache) set(key string, spfRecord string, found bool) {
 		expiry:    time.Now().Add(*cacheTTL),
 		found:     found,
 		size:      size,
+		hits:      0,
 	}
 
 	c.cache[key] = entry
 	c.totalSize += size
-
 	c.evictOldest()
+	c.updateCacheMetrics()
 
-	// Update Prometheus metrics
 	cacheEntries.Set(float64(len(c.cache)))
 	cacheSizeBytes.Set(float64(c.totalSize))
 	cacheLimitBytes.Set(float64(c.limit))
@@ -395,10 +434,41 @@ func (c *dnsCache) cleanup() {
 		}
 	}
 
-	// Update Prometheus metrics
 	cacheEntries.Set(float64(len(c.cache)))
 	cacheSizeBytes.Set(float64(c.totalSize))
 	cacheLimitBytes.Set(float64(c.limit))
+	c.updateCacheMetrics()
+}
+
+func (c *dnsCache) updateCacheMetrics() {
+	if c.totalHits+c.totalMisses > 0 {
+		cacheHitRatio.Set(float64(c.totalHits) / float64(c.totalHits+c.totalMisses))
+	} else {
+		cacheHitRatio.Set(0)
+	}
+
+	now := time.Now()
+	var oldestAge, youngestAge time.Duration
+	var maxHits uint64
+	var mostUsedKey string
+
+	for key, entry := range c.cache {
+		age := now.Sub(entry.expiry.Add(-*cacheTTL))
+		if oldestAge == 0 || age > oldestAge {
+			oldestAge = age
+		}
+		if youngestAge == 0 || age < youngestAge {
+			youngestAge = age
+		}
+		if entry.hits > maxHits {
+			maxHits = entry.hits
+			mostUsedKey = key
+		}
+	}
+
+	cacheOldestEntryAge.Set(oldestAge.Seconds())
+	cacheYoungestEntryAge.Set(youngestAge.Seconds())
+	cacheMostUsedEntry.WithLabelValues(mostUsedKey).Set(float64(maxHits))
 }
 
 func (c *dnsCache) getStats() (entries int, totalSize int64, limit int64) {
@@ -812,7 +882,6 @@ func processDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	logQueryResponse(r, m, clientAddr, extraData)
-
 	w.WriteMsg(m)
 }
 
@@ -832,7 +901,6 @@ func startDNSServer(net, name, secret string, soreuseport bool) {
 }
 
 func startMetricsServer() {
-	// Register Prometheus metrics
 	prometheus.MustRegister(cacheEntries)
 	prometheus.MustRegister(cacheSizeBytes)
 	prometheus.MustRegister(cacheLimitBytes)
@@ -842,11 +910,15 @@ func startMetricsServer() {
 	prometheus.MustRegister(queryResponseTime)
 	prometheus.MustRegister(requestsPerSecond)
 	prometheus.MustRegister(concurrentQueries)
+	prometheus.MustRegister(cacheHitRatio)
+	prometheus.MustRegister(cacheOldestEntryAge)
+	prometheus.MustRegister(cacheYoungestEntryAge)
+	prometheus.MustRegister(cacheMostUsedEntry)
+	prometheus.MustRegister(cacheHitsTotal)
+	prometheus.MustRegister(cacheMissesTotal)
 
-	// Set initial cache limit metric
 	cacheLimitBytes.Set(float64(*cacheLimit))
 
-	// Start HTTP server for Prometheus metrics
 	http.Handle("/metrics", promhttp.Handler())
 	addr := fmt.Sprintf(":%d", *metricsPort)
 	go func() {
@@ -855,6 +927,24 @@ func startMetricsServer() {
 		}
 	}()
 	fmt.Printf("Metrics server started on port %d\n", *metricsPort)
+}
+
+func printConfig() {
+	fmt.Println("Configuration:")
+	fmt.Printf("SPFFY_CPUPROFILE=%s\n", *cpuprofile)
+	fmt.Printf("SPFFY_DEBUG=%v\n", *debugEnabled)
+	fmt.Printf("SPFFY_LOGFILE=%s\n", *logFile)
+	fmt.Printf("SPFFY_COMPRESS=%v\n", *compress)
+	fmt.Printf("SPFFY_TSIG=%s\n", *tsig)
+	fmt.Printf("SPFFY_SOREUSEPORT=%d\n", *soreuseport)
+	fmt.Printf("SPFFY_CPU=%d\n", *cpu)
+	fmt.Printf("SPFFY_BASEDOMAIN=%s\n", *baseDomain)
+	fmt.Printf("SPFFY_CACHELIMIT=%d\n", *cacheLimit)
+	fmt.Printf("SPFFY_DNSSERVERS=%s\n", *dnsServers)
+	fmt.Printf("SPFFY_VOIDLOOKUPLIMIT=%d\n", *voidLookupLimit)
+	fmt.Printf("SPFFY_CACHETTL=%s\n", *cacheTTL)
+	fmt.Printf("SPFFY_MAXCONCURRENT=%d\n", *maxConcurrent)
+	fmt.Printf("SPFFY_METRICSPORT=%d\n", *metricsPort)
 }
 
 func main() {
@@ -875,6 +965,8 @@ func main() {
 	flag.Parse()
 
 	loadEnvConfig()
+
+	printConfig()
 
 	if *tsig != "" {
 		a := strings.SplitN(*tsig, ":", 2)
