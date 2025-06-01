@@ -53,14 +53,82 @@ const (
 	LevelTrace
 )
 
+// LogBuffer stores recent logs and broadcasts to clients
+type LogBuffer struct {
+	mu      sync.Mutex
+	logs    []string
+	maxSize int
+	broad   chan string
+	clients map[chan string]struct{}
+}
+
+func NewLogBuffer(maxSize int) *LogBuffer {
+	return &LogBuffer{
+		logs:    make([]string, 0, maxSize),
+		maxSize: maxSize,
+		broad:   make(chan string, 100),
+		clients: make(map[chan string]struct{}),
+	}
+}
+
+func (lb *LogBuffer) Add(log string) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+
+	lb.logs = append(lb.logs, log)
+	if len(lb.logs) > lb.maxSize {
+		lb.logs = lb.logs[1:]
+	}
+
+	select {
+	case lb.broad <- log:
+	default:
+	}
+}
+
+func (lb *LogBuffer) GetAll() []string {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return append([]string{}, lb.logs...)
+}
+
+func (lb *LogBuffer) RegisterClient() chan string {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	ch := make(chan string, 100)
+	lb.clients[ch] = struct{}{}
+	return ch
+}
+
+func (lb *LogBuffer) UnregisterClient(ch chan string) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	delete(lb.clients, ch)
+	close(ch)
+}
+
+func (lb *LogBuffer) Broadcast() {
+	for log := range lb.broad {
+		lb.mu.Lock()
+		for ch := range lb.clients {
+			select {
+			case ch <- log:
+			default:
+			}
+		}
+		lb.mu.Unlock()
+	}
+}
+
 // Logger is a custom logger with leveled logging
 type Logger struct {
 	level  LogLevel
 	writer *log.Logger
+	buffer *LogBuffer
 }
 
 // NewLogger creates a new logger with the specified level and output
-func NewLogger(levelStr string, output string) *Logger {
+func NewLogger(levelStr string, output string, buffer *LogBuffer) *Logger {
 	var level LogLevel
 	switch strings.ToUpper(levelStr) {
 	case "NONE":
@@ -92,6 +160,7 @@ func NewLogger(levelStr string, output string) *Logger {
 	return &Logger{
 		level:  level,
 		writer: writer,
+		buffer: buffer,
 	}
 }
 
@@ -109,7 +178,9 @@ func (l *Logger) logMessage(level LogLevel, msg map[string]interface{}) {
 		return
 	}
 
-	l.writer.Println(string(jsonData))
+	logStr := string(jsonData)
+	l.writer.Println(logStr)
+	l.buffer.Add(logStr)
 }
 
 func levelToString(level LogLevel) string {
@@ -581,8 +652,8 @@ func runCacheCleanup() {
 	}()
 }
 
-func configureLogger() {
-	logger = NewLogger(*logLevel, *logFile)
+func configureLogger(logBuffer *LogBuffer) {
+	logger = NewLogger(*logLevel, *logFile, logBuffer)
 }
 
 func logQueryResponse(r *dns.Msg, m *dns.Msg, clientAddr string, extraData map[string]interface{}) {
@@ -969,7 +1040,7 @@ func startDNSServer(net, name, secret string, soreuseport bool) {
 	}
 }
 
-func startMetricsServer() {
+func startMetricsServer(logBuffer *LogBuffer) {
 	prometheus.MustRegister(cacheEntries)
 	prometheus.MustRegister(cacheSizeBytes)
 	prometheus.MustRegister(cacheLimitBytes)
@@ -989,6 +1060,65 @@ func startMetricsServer() {
 	cacheLimitBytes.Set(float64(*cacheLimit))
 
 	http.Handle("/metrics", promhttp.Handler())
+	http.HandleFunc("/logs", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("stream") == "true" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+
+			clientChan := logBuffer.RegisterClient()
+			defer logBuffer.UnregisterClient(clientChan)
+
+			for _, log := range logBuffer.GetAll() {
+				fmt.Fprintf(w, "data: %s\n\n", log)
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			}
+
+			for log := range clientChan {
+				fmt.Fprintf(w, "data: %s\n\n", log)
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			}
+		} else {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SPFFY Logs</title>
+    <style>
+        body { font-family: monospace; margin: 20px; }
+        #logs { white-space: pre-wrap; background: #f0f0f0; padding: 10px; max-height: 80vh; overflow-y: auto; }
+    </style>
+</head>
+<body>
+    <h1>SPFFY Logs</h1>
+    <div id="logs"></div>
+    <script>
+        const logs = document.getElementById('logs');
+        const source = new EventSource('/logs?stream=true');
+        source.onmessage = function(event) {
+            const div = document.createElement('div');
+            div.textContent = event.data;
+            logs.appendChild(div);
+            logs.scrollTop = logs.scrollHeight;
+        };
+        source.onerror = function() {
+            source.close();
+            const div = document.createElement('div');
+            div.textContent = 'Connection lost. Please refresh to reconnect.';
+            logs.appendChild(div);
+        };
+    </script>
+</body>
+</html>
+`)
+		}
+	})
+
 	addr := fmt.Sprintf(":%d", *metricsPort)
 	go func() {
 		if err := http.ListenAndServe(addr, nil); err != nil {
@@ -998,8 +1128,10 @@ func startMetricsServer() {
 		}
 	}()
 	logger.Info(map[string]interface{}{
-		"message": fmt.Sprintf("Metrics server started on port %d", *metricsPort),
+		"message": fmt.Sprintf("Metrics and logs server started on port %d", *metricsPort),
 	})
+
+	go logBuffer.Broadcast()
 }
 
 func printConfig() {
@@ -1042,12 +1174,15 @@ func main() {
 		fmt.Println("  Set soreuseport to the number of server instances to start.")
 		fmt.Println("  Each instance uses SO_REUSEPORT to share the same port, enabling kernel-level load balancing.")
 		fmt.Println("  Example: SPFFY_SOREUSEPORT=4 starts 4 TCP and 4 UDP servers.")
+		fmt.Println("\nLogs Endpoint:")
+		fmt.Println("  Access /logs on the metrics port to view streaming logs in the browser.")
 	}
 	flag.Parse()
 
 	loadEnvConfig()
 
-	configureLogger()
+	logBuffer := NewLogBuffer(1000)
+	configureLogger(logBuffer)
 
 	printConfig()
 
@@ -1087,7 +1222,7 @@ func main() {
 
 	runCacheCleanup()
 
-	startMetricsServer()
+	startMetricsServer(logBuffer)
 
 	if *cpu != 0 {
 		runtime.GOMAXPROCS(*cpu)
