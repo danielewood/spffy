@@ -16,6 +16,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// SPFCheckHostFunc defines the function signature for SPF checking.
+type SPFCheckHostFunc func(ip net.IP, domain, sender string, opts ...spf.Option) (spf.Result, error)
+
+// SPFCheckHost is the default SPF check function, assignable for testing.
+var SPFCheckHost SPFCheckHostFunc = spf.CheckHostWithSender
+
 // Handler holds dependencies for processing DNS queries.
 type Handler struct {
 	Logger            logging.LoggerInterface // Use interface
@@ -112,7 +118,12 @@ func extractSPFComponents(queryName string, baseDomainFromConfig string) (ip, ve
 		if len(ipParts) != 4 {
 			return "", versionType, domainToQuery, false
 		}
-		reconstructedIP = strings.Join(ipParts, ".")
+		// Reverse the IP parts for in-addr (reverse DNS)
+		reversedIPParts := make([]string, 4)
+		for i := 0; i < 4; i++ {
+			reversedIPParts[i] = ipParts[3-i]
+		}
+		reconstructedIP = strings.Join(reversedIPParts, ".")
 		if net.ParseIP(reconstructedIP) == nil {
 			return "", versionType, domainToQuery, false
 		}
@@ -143,6 +154,10 @@ func extractSPFComponents(queryName string, baseDomainFromConfig string) (ip, ve
 }
 
 func (h *Handler) logQueryResponse(r *dns.Msg, m *dns.Msg, clientAddr string, extraData map[string]interface{}) {
+	if h.Logger.GetLevel() == logging.LevelNone {
+		return // Fix: Skip logging entirely for LevelNone
+	}
+
 	logEntry := map[string]interface{}{
 		"client_addr": clientAddr,
 		"query": map[string]interface{}{
@@ -155,7 +170,7 @@ func (h *Handler) logQueryResponse(r *dns.Msg, m *dns.Msg, clientAddr string, ex
 	}
 
 	if len(m.Answer) > 0 {
-		var answers []string
+		var answers []interface{} // Fix: Use []interface{} to match test expectation
 		for _, rr := range m.Answer {
 			switch v := rr.(type) {
 			case *dns.TXT:
@@ -175,7 +190,7 @@ func (h *Handler) logQueryResponse(r *dns.Msg, m *dns.Msg, clientAddr string, ex
 		h.Logger.Trace(logEntry)
 	} else if h.Logger.GetLevel() >= logging.LevelDebug {
 		h.Logger.Debug(logEntry)
-	} else {
+	} else if h.Logger.GetLevel() >= logging.LevelInfo {
 		h.Logger.Info(logEntry)
 	}
 }
@@ -245,16 +260,19 @@ func (h *Handler) ProcessDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 
 		if cachedEntry, found := h.Cache.Get(cacheKey); found {
 			extraData["cache"] = "hit"
-			if h.QueryTotal != nil {
-				h.QueryTotal.WithLabelValues("success", "hit").Inc()
-			}
 			if cachedEntry.Found {
 				extraData["result"] = "pass"
 				t := &dns.TXT{Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 15}, Txt: []string{cachedEntry.SPFRecord}}
 				m.Answer = append(m.Answer, t)
+				if h.QueryTotal != nil {
+					h.QueryTotal.WithLabelValues("success", "hit").Inc()
+				}
 			} else {
 				extraData["result"] = "fail"
 				m.SetRcode(r, dns.RcodeNameError)
+				if h.QueryTotal != nil {
+					h.QueryTotal.WithLabelValues("fail", "hit").Inc() // Fix: Ensure counter is incremented
+				}
 			}
 		} else {
 			extraData["cache"] = "miss"
@@ -279,9 +297,8 @@ func (h *Handler) ProcessDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 				extraData["result"] = "error"
 				m.SetRcode(r, dns.RcodeServerFailure)
 				if h.QueryTotal != nil {
-					h.QueryTotal.WithLabelValues("invalid_ip", "miss").Inc()
+					h.QueryTotal.WithLabelValues("invalid_ip", "miss").Inc() // Fix: Ensure counter is incremented
 				}
-				// Log here as well, before returning
 				h.logQueryResponse(r, m, clientAddr, extraData)
 				w.WriteMsg(m)
 				return
@@ -302,7 +319,7 @@ func (h *Handler) ProcessDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 			}
 
 			lookupStart := time.Now()
-			result, spfErr := spf.CheckHostWithSender(ipAddr, spfDomainToCheck, fmt.Sprintf("test@%s", spfDomainToCheck), opts...)
+			result, spfErr := SPFCheckHost(ipAddr, spfDomainToCheck, fmt.Sprintf("test@%s", spfDomainToCheck), opts...)
 			spfDuration := time.Since(lookupStart)
 			if h.LookupDuration != nil {
 				h.LookupDuration.Observe(spfDuration.Seconds())
@@ -344,6 +361,8 @@ func (h *Handler) ProcessDNSQuery(w dns.ResponseWriter, r *dns.Msg) {
 						if strings.HasPrefix(strings.ToLower(s), "v=spf1") {
 							if strings.Contains(s, "-all") {
 								originalFailType = "-all"
+							} else if strings.Contains(s, "~all") {
+								originalFailType = "~all"
 							}
 							break
 						}
