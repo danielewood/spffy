@@ -26,6 +26,10 @@ type Settings struct {
 	MetricsPort     int    `json:"metricsport"`
 	TCPAddr         string `json:"tcpaddr"` // Added
 	UDPAddr         string `json:"udpaddr"` // Added
+	RedisAddr       string `json:"redisaddr"`
+	RedisPassword   string `json:"redispassword"`
+	RedisDB         int    `json:"redisdb"`
+	CacheType       string `json:"cachetype"`
 }
 
 // Flags holds the command-line flags
@@ -46,6 +50,10 @@ type Flags struct {
 	MetricsPort     *int
 	TCPAddr         *string // Added
 	UDPAddr         *string // Added
+	RedisAddr       *string
+	RedisPassword   *string
+	RedisDB         *int
+	CacheType       *string
 }
 
 func envString(envKey, defaultValue string) string {
@@ -151,6 +159,18 @@ func LoadEnvConfig(f *Flags) {
 	if !isFlagSet("udpaddr") {
 		*f.UDPAddr = envString("SPFFY_UDPADDR", *f.UDPAddr)
 	}
+	if !isFlagSet("redisaddr") {
+		*f.RedisAddr = envString("SPFFY_REDIS_ADDR", *f.RedisAddr)
+	}
+	if !isFlagSet("redispassword") {
+		*f.RedisPassword = envString("SPFFY_REDIS_PASSWORD", *f.RedisPassword)
+	}
+	if !isFlagSet("redisdb") {
+		*f.RedisDB = envInt("SPFFY_REDIS_DB", *f.RedisDB)
+	}
+	if !isFlagSet("cachetype") {
+		*f.CacheType = envString("SPFFY_CACHE_TYPE", *f.CacheType)
+	}
 }
 
 // PrintConfig prints the current configuration using a logger interface.
@@ -176,6 +196,10 @@ func PrintConfig(f *Flags, logFunc func(msg map[string]interface{})) {
 			"SPFFY_METRICSPORT":     *f.MetricsPort,
 			"SPFFY_TCPADDR":         *f.TCPAddr,
 			"SPFFY_UDPADDR":         *f.UDPAddr,
+			"SPFFY_REDIS_ADDR":      *f.RedisAddr,
+			"SPFFY_REDIS_PASSWORD":  *f.RedisPassword,
+			"SPFFY_REDIS_DB":        *f.RedisDB,
+			"SPFFY_CACHE_TYPE":      *f.CacheType,
 		},
 	})
 }
@@ -245,6 +269,10 @@ func GetInitialSettings() *Flags {
 	f.MetricsPort = defineIntFlag("metricsport", 8080, "port for metrics server")
 	f.TCPAddr = defineStringFlag("tcpaddr", "[::]:8053", "TCP listen address (default: [::]:8053)")
 	f.UDPAddr = defineStringFlag("udpaddr", ":8053", "UDP listen address (default: :8053)")
+	f.RedisAddr = defineStringFlag("redisaddr", "localhost:6379", "Redis server address")
+	f.RedisPassword = defineStringFlag("redispassword", "", "Redis password")
+	f.RedisDB = defineIntFlag("redisdb", 0, "Redis database number")
+	f.CacheType = defineStringFlag("cachetype", "inmemory", "type of cache to use: inmemory or redis")
 
 	// Only set flag.Usage and call flag.Parse() if not already parsed (e.g. in test context)
 	// This is still tricky with the default flagset. A dedicated FlagSet for the app is better.
@@ -264,7 +292,8 @@ func GetInitialSettings() *Flags {
 			fmt.Println("  SPFFY_TSIG, SPFFY_SOREUSEPORT, SPFFY_CPU, SPFFY_BASEDOMAIN,")
 			fmt.Println("  SPFFY_CACHELIMIT, SPFFY_DNSSERVERS, SPFFY_VOIDLOOKUPLIMIT,")
 			fmt.Println("  SPFFY_CACHETTL, SPFFY_MAXCONCURRENT, SPFFY_METRICSPORT,")
-			fmt.Println("  SPFFY_TCPADDR, SPFFY_UDPADDR")
+			fmt.Println("  SPFFY_TCPADDR, SPFFY_UDPADDR,")
+			fmt.Println("  SPFFY_REDIS_ADDR, SPFFY_REDIS_PASSWORD, SPFFY_REDIS_DB, SPFFY_CACHE_TYPE")
 			fmt.Println("\nDNS Servers:")
 			fmt.Println("  Use comma-separated list for multiple servers (load balanced).")
 			fmt.Println("  Example: SPFFY_DNSSERVERS=8.8.8.8:53,1.1.1.1:53,9.9.9.9:53")
