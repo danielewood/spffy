@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	// "strings" // Removed as it's unused
 )
 
 // Settings holds all configurable settings
@@ -24,8 +23,8 @@ type Settings struct {
 	CacheTTL        int    `json:"cachettl"`
 	MaxConcurrent   int    `json:"maxconcurrent"`
 	MetricsPort     int    `json:"metricsport"`
-	TCPAddr         string `json:"tcpaddr"` // Added
-	UDPAddr         string `json:"udpaddr"` // Added
+	TCPAddr         string `json:"tcpaddr"`
+	UDPAddr         string `json:"udpaddr"`
 	RedisAddr       string `json:"redisaddr"`
 	RedisPassword   string `json:"redispassword"`
 	RedisDB         int    `json:"redisdb"`
@@ -48,8 +47,8 @@ type Flags struct {
 	CacheTTL        *int
 	MaxConcurrent   *int
 	MetricsPort     *int
-	TCPAddr         *string // Added
-	UDPAddr         *string // Added
+	TCPAddr         *string
+	UDPAddr         *string
 	RedisAddr       *string
 	RedisPassword   *string
 	RedisDB         *int
@@ -99,9 +98,9 @@ func envUint(envKey string, defaultValue uint) uint {
 	return defaultValue
 }
 
-func isFlagSet(name string) bool {
+func isFlagSet(fs *flag.FlagSet, name string) bool {
 	found := false
-	flag.Visit(func(f *flag.Flag) {
+	fs.Visit(func(f *flag.Flag) {
 		if f.Name == name {
 			found = true
 		}
@@ -110,72 +109,70 @@ func isFlagSet(name string) bool {
 }
 
 // LoadEnvConfig loads configuration from environment variables, respecting command-line flags.
-func LoadEnvConfig(f *Flags) {
-	if !isFlagSet("cpuprofile") {
+func LoadEnvConfig(f *Flags, fs *flag.FlagSet) {
+	if !isFlagSet(fs, "cpuprofile") {
 		*f.CPUProfile = envString("SPFFY_CPUPROFILE", *f.CPUProfile)
 	}
-	if !isFlagSet("loglevel") {
+	if !isFlagSet(fs, "loglevel") {
 		*f.LogLevel = envString("SPFFY_LOGLEVEL", *f.LogLevel)
 	}
-	if !isFlagSet("logfile") {
+	if !isFlagSet(fs, "logfile") {
 		*f.LogFile = envString("SPFFY_LOGFILE", *f.LogFile)
 	}
-	if !isFlagSet("compress") {
+	if !isFlagSet(fs, "compress") {
 		*f.Compress = envBool("SPFFY_COMPRESS", *f.Compress)
 	}
-	if !isFlagSet("tsig") {
+	if !isFlagSet(fs, "tsig") {
 		*f.TSIG = envString("SPFFY_TSIG", *f.TSIG)
 	}
-	if !isFlagSet("soreuseport") {
+	if !isFlagSet(fs, "soreuseport") {
 		*f.SOReusePort = envInt("SPFFY_SOREUSEPORT", *f.SOReusePort)
 	}
-	if !isFlagSet("cpu") {
+	if !isFlagSet(fs, "cpu") {
 		*f.CPU = envInt("SPFFY_CPU", *f.CPU)
 	}
-	if !isFlagSet("basedomain") {
+	if !isFlagSet(fs, "basedomain") {
 		*f.BaseDomain = envString("SPFFY_BASEDOMAIN", *f.BaseDomain)
 	}
-	if !isFlagSet("cachelimit") {
+	if !isFlagSet(fs, "cachelimit") {
 		*f.CacheLimit = envInt64("SPFFY_CACHELIMIT", *f.CacheLimit)
 	}
-	if !isFlagSet("dnsservers") {
+	if !isFlagSet(fs, "dnsservers") {
 		*f.DNSServers = envString("SPFFY_DNSSERVERS", *f.DNSServers)
 	}
-	if !isFlagSet("voidlookuplimit") {
+	if !isFlagSet(fs, "voidlookuplimit") {
 		*f.VoidLookupLimit = envUint("SPFFY_VOIDLOOKUPLIMIT", *f.VoidLookupLimit)
 	}
-	if !isFlagSet("cachettl") {
+	if !isFlagSet(fs, "cachettl") {
 		*f.CacheTTL = envInt("SPFFY_CACHETTL", *f.CacheTTL)
 	}
-	if !isFlagSet("maxconcurrent") {
+	if !isFlagSet(fs, "maxconcurrent") {
 		*f.MaxConcurrent = envInt("SPFFY_MAXCONCURRENT", *f.MaxConcurrent)
 	}
-	if !isFlagSet("metricsport") {
+	if !isFlagSet(fs, "metricsport") {
 		*f.MetricsPort = envInt("SPFFY_METRICSPORT", *f.MetricsPort)
 	}
-	if !isFlagSet("tcpaddr") {
+	if !isFlagSet(fs, "tcpaddr") {
 		*f.TCPAddr = envString("SPFFY_TCPADDR", *f.TCPAddr)
 	}
-	if !isFlagSet("udpaddr") {
+	if !isFlagSet(fs, "udpaddr") {
 		*f.UDPAddr = envString("SPFFY_UDPADDR", *f.UDPAddr)
 	}
-	if !isFlagSet("redisaddr") {
+	if !isFlagSet(fs, "redisaddr") {
 		*f.RedisAddr = envString("SPFFY_REDIS_ADDR", *f.RedisAddr)
 	}
-	if !isFlagSet("redispassword") {
+	if !isFlagSet(fs, "redispassword") {
 		*f.RedisPassword = envString("SPFFY_REDIS_PASSWORD", *f.RedisPassword)
 	}
-	if !isFlagSet("redisdb") {
+	if !isFlagSet(fs, "redisdb") {
 		*f.RedisDB = envInt("SPFFY_REDIS_DB", *f.RedisDB)
 	}
-	if !isFlagSet("cachetype") {
+	if !isFlagSet(fs, "cachetype") {
 		*f.CacheType = envString("SPFFY_CACHE_TYPE", *f.CacheType)
 	}
 }
 
 // PrintConfig prints the current configuration using a logger interface.
-// As the logger is not part of this package, it needs to be passed in.
-// This function is a placeholder and might need adjustment based on how logging is handled.
 func PrintConfig(f *Flags, logFunc func(msg map[string]interface{})) {
 	logFunc(map[string]interface{}{
 		"message": "Configuration",
@@ -205,19 +202,14 @@ func PrintConfig(f *Flags, logFunc func(msg map[string]interface{})) {
 }
 
 // GetInitialSettings creates and initializes a Flags struct with default values and command-line parsing.
-// It's made idempotent for testing purposes by checking if flags are already defined.
 func GetInitialSettings() *Flags {
 	f := &Flags{}
 
 	// Helper to define string flag if not already defined
 	defineStringFlag := func(name, value, usage string) *string {
 		if fl := flag.Lookup(name); fl != nil {
-			// Flag already defined, retrieve its current value pointer
-			// This is a bit tricky as direct access to the pointer stored by flag.String is not simple.
-			// For testing, it's often better to use flag.NewFlagSet.
-			// However, to make GetInitialSettings callable multiple times using default flagset:
-			s, _ := fl.Value.(flag.Getter).Get().(string) // Get current value
-			return &s                                     // Return pointer to a copy; not ideal as it won't update original
+			s, _ := fl.Value.(flag.Getter).Get().(string)
+			return &s
 		}
 		return flag.String(name, value, usage)
 	}
@@ -244,7 +236,6 @@ func GetInitialSettings() *Flags {
 	}
 	defineUintFlag := func(name string, value uint, usage string) *uint {
 		if fl := flag.Lookup(name); fl != nil {
-			// flag.Getter for uint returns int64, needs conversion
 			u64, _ := fl.Value.(flag.Getter).Get().(uint64)
 			u := uint(u64)
 			return &u
@@ -273,15 +264,6 @@ func GetInitialSettings() *Flags {
 	f.RedisDB = defineIntFlag("redisdb", 0, "Redis database number")
 	f.CacheType = defineStringFlag("cachetype", "inmemory", "type of cache to use: inmemory or redis")
 
-	// Only set flag.Usage and call flag.Parse() if not already parsed (e.g. in test context)
-	// This is still tricky with the default flagset. A dedicated FlagSet for the app is better.
-	// For now, we assume tests might call this multiple times but main calls it once.
-	// The redefinition panic happens at flag.String etc. if called multiple times.
-	// The helper define*Flag should prevent this.
-
-	// If GetInitialSettings is called for the first time (usually in main), set up Usage and Parse.
-	// Heuristic: if -h or -help is present, flag.Parse will handle it.
-	// This check `flag.Parsed()` helps to avoid issues in tests.
 	if !flag.Parsed() {
 		flag.Usage = func() {
 			flag.PrintDefaults()
@@ -309,12 +291,6 @@ func GetInitialSettings() *Flags {
 		}
 		flag.Parse()
 	}
-	LoadEnvConfig(f) // Load environment variables, potentially overriding defaults/flags
+	LoadEnvConfig(f, flag.CommandLine) // Use default flag set for main application
 	return f
 }
-
-// The following lines were erroneously outside the GetInitialSettings function.
-// They are part of flag.Usage which is correctly set inside the if !flag.Parsed() block.
-// This entire block of text from flag.PrintDefaults() down to LoadEnvConfig(f) and return f
-// was duplicated and misplaced. The correct structure is already within the GetInitialSettings func.
-// I will remove these duplicated lines.
