@@ -105,14 +105,8 @@ func main() {
 		Name: "spffy_cache_misses_total", Help: "Total number of cache misses",
 	})
 
-	// Register all Prometheus metrics
-	prometheus.MustRegister(cacheEntriesGauge)
-	prometheus.MustRegister(cacheSizeBytesGauge)
-	prometheus.MustRegister(cacheLimitBytesGauge)
+	// Register common Prometheus metrics (used by both cache types or general app)
 	prometheus.MustRegister(cacheHitRatioGauge)
-	prometheus.MustRegister(cacheOldestEntryAgeGauge)
-	prometheus.MustRegister(cacheYoungestEntryAgeGauge)
-	prometheus.MustRegister(cacheMostUsedEntryGaugeVec)
 	prometheus.MustRegister(cacheHitsTotalCounter)
 	prometheus.MustRegister(cacheMissesTotalCounter)
 	prometheus.MustRegister(queryTotal)
@@ -123,20 +117,73 @@ func main() {
 	prometheus.MustRegister(concurrentQueries)
 
 	// Initialize the cache
-	// theCache is declared as cache.CacheInterface. NewDNSCache returns *cache.DNSCache which implements it.
-	var theCache cache.CacheInterface = cache.NewDNSCache(
-		*configFlags.CacheTTL,
-		*configFlags.CacheLimit,
-		cacheEntriesGauge,
-		cacheSizeBytesGauge,
-		cacheLimitBytesGauge,
-		cacheHitRatioGauge,
-		cacheOldestEntryAgeGauge,
-		cacheYoungestEntryAgeGauge,
-		cacheMostUsedEntryGaugeVec,
-		cacheHitsTotalCounter,
-		cacheMissesTotalCounter,
-	)
+	var theCache cache.CacheInterface
+	var err error // Declare error variable for cache initialization
+
+	cacheTypeLower := strings.ToLower(*configFlags.CacheType)
+
+	if cacheTypeLower == "redis" {
+		// Register Redis-specific or common metrics used by RedisCache
+		// (Hits, Misses, Ratio are already registered as common)
+		logger.Info(map[string]interface{}{"message": "Using Redis cache", "addr": *configFlags.RedisAddr, "db": *configFlags.RedisDB})
+		theCache, err = cache.NewRedisCache(
+			*configFlags.RedisAddr,
+			*configFlags.RedisPassword,
+			*configFlags.RedisDB,
+			*configFlags.CacheTTL,
+			cacheHitsTotalCounter,   // Pass common metric
+			cacheMissesTotalCounter, // Pass common metric
+			cacheHitRatioGauge,      // Pass common metric
+		)
+		if err != nil {
+			logger.Error(map[string]interface{}{"message": fmt.Sprintf("Failed to initialize Redis cache: %v. Ensure Redis is running and accessible.", err)})
+			os.Exit(1)
+		}
+		logger.Info(map[string]interface{}{"message": "Successfully connected to Redis cache."})
+
+	} else {
+		if cacheTypeLower != "inmemory" && cacheTypeLower != "" { // Allow empty to mean default
+			logger.Warn(map[string]interface{}{"message": fmt.Sprintf("Unknown cache type '%s', defaulting to inmemory.", *configFlags.CacheType)})
+		}
+		// Register DNSCache specific metrics only if using inmemory cache
+		prometheus.MustRegister(cacheEntriesGauge)
+		prometheus.MustRegister(cacheSizeBytesGauge)
+		prometheus.MustRegister(cacheLimitBytesGauge)
+		prometheus.MustRegister(cacheOldestEntryAgeGauge)
+		prometheus.MustRegister(cacheYoungestEntryAgeGauge)
+		prometheus.MustRegister(cacheMostUsedEntryGaugeVec)
+		// Hits, Misses, Ratio are already registered as common
+
+		logger.Info(map[string]interface{}{"message": "Using in-memory cache."})
+		theCache = cache.NewDNSCache(
+			*configFlags.CacheTTL,
+			*configFlags.CacheLimit,
+			cacheEntriesGauge,
+			cacheSizeBytesGauge,
+			cacheLimitBytesGauge,
+			cacheHitRatioGauge,
+			cacheOldestEntryAgeGauge,
+			cacheYoungestEntryAgeGauge,
+			cacheMostUsedEntryGaugeVec,
+			cacheHitsTotalCounter,
+			cacheMissesTotalCounter,
+		)
+		// For in-memory cache, start the cleanup routine
+		// This check is important because RunCacheCleanup expects *cache.DNSCache.
+		if concreteCache, ok := theCache.(*cache.DNSCache); ok {
+			logger.Info(map[string]interface{}{"message": "Starting in-memory cache cleanup routine."})
+			cache.RunCacheCleanup(concreteCache, 30*time.Second)
+		} else {
+			// This case should not happen if "inmemory" type correctly initializes DNSCache.
+			logger.Error(map[string]interface{}{"message": "In-memory cache initialization failed to return *cache.DNSCache, cleanup routine not started."})
+		}
+	}
+
+	// Ensure theCache is not nil before proceeding (should be caught by os.Exit above if Redis fails)
+	if theCache == nil {
+		logger.Error(map[string]interface{}{"message": "Cache initialization failed, exiting."})
+		os.Exit(1)
+	}
 
 	var tsigName, tsigSecret string
 	if *configFlags.TSIG != "" {
@@ -182,11 +229,8 @@ func main() {
 		}
 	}
 
-	if concreteCache, ok := theCache.(*cache.DNSCache); ok {
-		cache.RunCacheCleanup(concreteCache, 30*time.Second)
-	} else {
-		logger.Info(map[string]interface{}{"error": "Cache is not of concrete *cache.DNSCache type, cannot start cleanup routine."})
-	}
+	// The cache cleanup goroutine is now started conditionally within the cache initialization block for in-memory cache.
+	// No need for a separate block here.
 
 	httpServer := server.NewHTTPServer(
 		logger,
