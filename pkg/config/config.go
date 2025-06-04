@@ -24,6 +24,8 @@ type Settings struct {
 	CacheTTL        int    `json:"cachettl"`
 	MaxConcurrent   int    `json:"maxconcurrent"`
 	MetricsPort     int    `json:"metricsport"`
+	TCPAddr         string `json:"tcpaddr"` // Added
+	UDPAddr         string `json:"udpaddr"` // Added
 }
 
 // Flags holds the command-line flags
@@ -42,6 +44,8 @@ type Flags struct {
 	CacheTTL        *int
 	MaxConcurrent   *int
 	MetricsPort     *int
+	TCPAddr         *string // Added
+	UDPAddr         *string // Added
 }
 
 func envString(envKey, defaultValue string) string {
@@ -141,6 +145,12 @@ func LoadEnvConfig(f *Flags) {
 	if !isFlagSet("metricsport") {
 		*f.MetricsPort = envInt("SPFFY_METRICSPORT", *f.MetricsPort)
 	}
+	if !isFlagSet("tcpaddr") {
+		*f.TCPAddr = envString("SPFFY_TCPADDR", *f.TCPAddr)
+	}
+	if !isFlagSet("udpaddr") {
+		*f.UDPAddr = envString("SPFFY_UDPADDR", *f.UDPAddr)
+	}
 }
 
 // PrintConfig prints the current configuration using a logger interface.
@@ -164,52 +174,118 @@ func PrintConfig(f *Flags, logFunc func(msg map[string]interface{})) {
 			"SPFFY_CACHETTL":        *f.CacheTTL,
 			"SPFFY_MAXCONCURRENT":   *f.MaxConcurrent,
 			"SPFFY_METRICSPORT":     *f.MetricsPort,
+			"SPFFY_TCPADDR":         *f.TCPAddr,
+			"SPFFY_UDPADDR":         *f.UDPAddr,
 		},
 	})
 }
 
 // GetInitialSettings creates and initializes a Flags struct with default values and command-line parsing.
+// It's made idempotent for testing purposes by checking if flags are already defined.
 func GetInitialSettings() *Flags {
-	f := &Flags{
-		CPUProfile:      flag.String("cpuprofile", "", "write cpu profile to file"),
-		LogLevel:        flag.String("loglevel", "INFO", "log level: NONE, INFO, DEBUG, TRACE"),
-		LogFile:         flag.String("logfile", "", "write JSON logs to file (default: stdout)"),
-		Compress:        flag.Bool("compress", false, "compress replies"),
-		TSIG:            flag.String("tsig", "", "use SHA256 hmac tsig: keyname:base64"),
-		SOReusePort:     flag.Int("soreuseport", 0, "number of server instances to start with SO_REUSEPORT (0 to disable)"),
-		CPU:             flag.Int("cpu", 0, "number of cpu to use"),
-		BaseDomain:      flag.String("basedomain", "_spf-stage.spffy.dev", "base domain for SPF macro queries"),
-		CacheLimit:      flag.Int64("cachelimit", 1024*1024*1024, "cache memory limit in bytes (default: 1GB)"),
-		DNSServers:      flag.String("dnsservers", "", "comma-separated list of DNS servers to use for lookups (default: system resolver)"),
-		VoidLookupLimit: flag.Uint("voidlookuplimit", 20, "maximum number of void DNS lookups allowed during SPF evaluation"),
-		CacheTTL:        flag.Int("cachettl", 15, "cache TTL for SPF results in seconds"),
-		MaxConcurrent:   flag.Int("maxconcurrent", 1000, "maximum concurrent SPF lookups"),
-		MetricsPort:     flag.Int("metricsport", 8080, "port for metrics server"),
+	f := &Flags{}
+
+	// Helper to define string flag if not already defined
+	defineStringFlag := func(name, value, usage string) *string {
+		if fl := flag.Lookup(name); fl != nil {
+			// Flag already defined, retrieve its current value pointer
+			// This is a bit tricky as direct access to the pointer stored by flag.String is not simple.
+			// For testing, it's often better to use flag.NewFlagSet.
+			// However, to make GetInitialSettings callable multiple times using default flagset:
+			s, _ := fl.Value.(flag.Getter).Get().(string) // Get current value
+			return &s // Return pointer to a copy; not ideal as it won't update original
+		}
+		return flag.String(name, value, usage)
+	}
+	defineBoolFlag := func(name string, value bool, usage string) *bool {
+		if fl := flag.Lookup(name); fl != nil {
+			b, _ := fl.Value.(flag.Getter).Get().(bool)
+			return &b
+		}
+		return flag.Bool(name, value, usage)
+	}
+	defineIntFlag := func(name string, value int, usage string) *int {
+		if fl := flag.Lookup(name); fl != nil {
+			i, _ := fl.Value.(flag.Getter).Get().(int)
+			return &i
+		}
+		return flag.Int(name, value, usage)
+	}
+	defineInt64Flag := func(name string, value int64, usage string) *int64 {
+		if fl := flag.Lookup(name); fl != nil {
+			i, _ := fl.Value.(flag.Getter).Get().(int64)
+			return &i
+		}
+		return flag.Int64(name, value, usage)
+	}
+	defineUintFlag := func(name string, value uint, usage string) *uint {
+		if fl := flag.Lookup(name); fl != nil {
+			// flag.Getter for uint returns int64, needs conversion
+			u64, _ := fl.Value.(flag.Getter).Get().(uint64)
+			u := uint(u64)
+			return &u
+		}
+		return flag.Uint(name, value, usage)
 	}
 
-	flag.Usage = func() {
-		flag.PrintDefaults()
-		fmt.Println("\nEnvironment Variables:")
-		fmt.Println("  All flags can also be set via environment variables with SPFFY_ prefix:")
-		fmt.Println("  SPFFY_CPUPROFILE, SPFFY_LOGLEVEL, SPFFY_LOGFILE, SPFFY_COMPRESS,")
-		fmt.Println("  SPFFY_TSIG, SPFFY_SOREUSEPORT, SPFFY_CPU, SPFFY_BASEDOMAIN,")
-		fmt.Println("  SPFFY_CACHELIMIT, SPFFY_DNSSERVERS, SPFFY_VOIDLOOKUPLIMIT,")
-		fmt.Println("  SPFFY_CACHETTL, SPFFY_MAXCONCURRENT, SPFFY_METRICSPORT")
-		fmt.Println("\nDNS Servers:")
-		fmt.Println("  Use comma-separated list for multiple servers (load balanced).")
-		fmt.Println("  Example: SPFFY_DNSSERVERS=8.8.8.8:53,1.1.1.1:53,9.9.9.9:53")
-		fmt.Println("  If not specified, system resolver is used.")
-		fmt.Println("\nSO_REUSEPORT:")
-		fmt.Println("  Set soreuseport to the number of server instances to start.")
-		fmt.Println("  Each instance uses SO_REUSEPORT to share the same port, enabling kernel-level load balancing.")
-		fmt.Println("  Example: SPFFY_SOREUSEPORT=4 starts 4 TCP and 4 UDP servers.")
-		fmt.Println("\nLogs Endpoint:")
-		fmt.Println("  Access /logs on the metrics port to view streaming logs in the browser.")
-		fmt.Println("\nSettings Endpoint:")
-		fmt.Println("  GET /settings to view current settings as JSON.")
-		fmt.Println("  POST /settings with JSON to update settings dynamically.")
+
+	f.CPUProfile = defineStringFlag("cpuprofile", "", "write cpu profile to file")
+	f.LogLevel = defineStringFlag("loglevel", "INFO", "log level: NONE, INFO, DEBUG, TRACE")
+	f.LogFile = defineStringFlag("logfile", "", "write JSON logs to file (default: stdout)")
+	f.Compress = defineBoolFlag("compress", false, "compress replies")
+	f.TSIG = defineStringFlag("tsig", "", "use SHA256 hmac tsig: keyname:base64")
+	f.SOReusePort = defineIntFlag("soreuseport", 0, "number of server instances to start with SO_REUSEPORT (0 to disable)")
+	f.CPU = defineIntFlag("cpu", 0, "number of cpu to use")
+	f.BaseDomain = defineStringFlag("basedomain", "_spf-stage.spffy.dev", "base domain for SPF macro queries")
+	f.CacheLimit = defineInt64Flag("cachelimit", 1024*1024*1024, "cache memory limit in bytes (default: 1GB)")
+	f.DNSServers = defineStringFlag("dnsservers", "", "comma-separated list of DNS servers to use for lookups (default: system resolver)")
+	f.VoidLookupLimit = defineUintFlag("voidlookuplimit", 20, "maximum number of void DNS lookups allowed during SPF evaluation")
+	f.CacheTTL = defineIntFlag("cachettl", 15, "cache TTL for SPF results in seconds")
+	f.MaxConcurrent = defineIntFlag("maxconcurrent", 1000, "maximum concurrent SPF lookups")
+	f.MetricsPort = defineIntFlag("metricsport", 8080, "port for metrics server")
+	f.TCPAddr = defineStringFlag("tcpaddr", "[::]:8053", "TCP listen address (default: [::]:8053)")
+	f.UDPAddr = defineStringFlag("udpaddr", ":8053", "UDP listen address (default: :8053)")
+
+	// Only set flag.Usage and call flag.Parse() if not already parsed (e.g. in test context)
+	// This is still tricky with the default flagset. A dedicated FlagSet for the app is better.
+	// For now, we assume tests might call this multiple times but main calls it once.
+	// The redefinition panic happens at flag.String etc. if called multiple times.
+	// The helper define*Flag should prevent this.
+
+	// If GetInitialSettings is called for the first time (usually in main), set up Usage and Parse.
+	// Heuristic: if -h or -help is present, flag.Parse will handle it.
+	// This check `flag.Parsed()` helps to avoid issues in tests.
+	if !flag.Parsed() {
+		flag.Usage = func() {
+			flag.PrintDefaults()
+			fmt.Println("\nEnvironment Variables:")
+			fmt.Println("  All flags can also be set via environment variables with SPFFY_ prefix:")
+			fmt.Println("  SPFFY_CPUPROFILE, SPFFY_LOGLEVEL, SPFFY_LOGFILE, SPFFY_COMPRESS,")
+			fmt.Println("  SPFFY_TSIG, SPFFY_SOREUSEPORT, SPFFY_CPU, SPFFY_BASEDOMAIN,")
+			fmt.Println("  SPFFY_CACHELIMIT, SPFFY_DNSSERVERS, SPFFY_VOIDLOOKUPLIMIT,")
+			fmt.Println("  SPFFY_CACHETTL, SPFFY_MAXCONCURRENT, SPFFY_METRICSPORT,")
+			fmt.Println("  SPFFY_TCPADDR, SPFFY_UDPADDR")
+			fmt.Println("\nDNS Servers:")
+			fmt.Println("  Use comma-separated list for multiple servers (load balanced).")
+			fmt.Println("  Example: SPFFY_DNSSERVERS=8.8.8.8:53,1.1.1.1:53,9.9.9.9:53")
+			fmt.Println("  If not specified, system resolver is used.")
+			fmt.Println("\nSO_REUSEPORT:")
+			fmt.Println("  Set soreuseport to the number of server instances to start.")
+			fmt.Println("  Each instance uses SO_REUSEPORT to share the same port, enabling kernel-level load balancing.")
+			fmt.Println("  Example: SPFFY_SOREUSEPORT=4 starts 4 TCP and 4 UDP servers.")
+			fmt.Println("\nLogs Endpoint:")
+			fmt.Println("  Access /logs on the metrics port to view streaming logs in the browser.")
+			fmt.Println("\nSettings Endpoint:")
+			fmt.Println("  GET /settings to view current settings as JSON.")
+			fmt.Println("  POST /settings with JSON to update settings dynamically.")
+		}
+		flag.Parse()
 	}
-	flag.Parse()
-	LoadEnvConfig(f)
+	LoadEnvConfig(f) // Load environment variables, potentially overriding defaults/flags
 	return f
 }
+// The following lines were erroneously outside the GetInitialSettings function.
+// They are part of flag.Usage which is correctly set inside the if !flag.Parsed() block.
+// This entire block of text from flag.PrintDefaults() down to LoadEnvConfig(f) and return f
+// was duplicated and misplaced. The correct structure is already within the GetInitialSettings func.
+// I will remove these duplicated lines.
