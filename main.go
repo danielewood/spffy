@@ -124,7 +124,7 @@ func main() {
 
 	// Initialize the cache
 	// theCache is declared as cache.CacheInterface. NewDNSCache returns *cache.DNSCache which implements it.
-	theCache := cache.NewDNSCache(
+	var theCache cache.CacheInterface = cache.NewDNSCache(
 		*configFlags.CacheTTL,
 		*configFlags.CacheLimit,
 		cacheEntriesGauge,

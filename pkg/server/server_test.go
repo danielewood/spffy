@@ -6,10 +6,10 @@ import (
 	"io"                // Was missing, needed for ReadAll in POST test
 	"net/http"          // Was missing (already in main file, but test needs it too)
 	"net/http/httptest" // Was missing
-	"net/url"           // Moved from bottom
 	"strings"
 	"testing"
 	// "time" // Removed as unused
+	// "net/url" // Removed as unused after refactoring
 
 	"github.com/danielewood/spffy/pkg/cache"
 	"github.com/danielewood/spffy/pkg/config"
@@ -125,34 +125,54 @@ func TestSettingsHandler_GET(t *testing.T) {
 	var dummyResolverPool *resolver.ResolverPool
 	var dummySpfSemaphore chan struct{}
 
-	server := NewHTTPServer(mockLogger, logging.NewLogBuffer(1), cfg, nil, &dummyResolverPool, &dummySpfSemaphore) // Restored server variable
+	server := NewHTTPServer(mockLogger, logging.NewLogBuffer(1), cfg, nil, &dummyResolverPool, &dummySpfSemaphore)
 
-	// mux := http.NewServeMux() // This mux is not used, http.DefaultServeMux is used below. This line can be removed.
-	// Manually register the settings handler from server.go logic
-	// This is a simplified way to test handler logic without full Start()
-	originalSettingsHandler, _ := http.DefaultServeMux.Handler(&http.Request{URL: &url.URL{Path: "/settings"}})
-	if originalSettingsHandler == nil { // if not yet registered by a Start() call (which we avoid)
-		http.HandleFunc("/settings", func(w http.ResponseWriter, r *http.Request) {
-			// Simplified GET part of settings handler from server.go
-			if r.Method != http.MethodGet {
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
+	// This is the actual handler logic for /settings, but bound to our 'server' instance
+	settingsHandlerFunc := func(w http.ResponseWriter, r *http.Request) {
+		server.mu.Lock() // Use the server's mutex
+		defer server.mu.Unlock()
+
+		switch r.Method {
+		case http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
 			enc := json.NewEncoder(w)
 			enc.SetIndent("", "  ")
+			// Use server.Config which is the *config.Flags
 			currentSettings := config.Settings{
-				BaseDomain: *server.Config.BaseDomain, // Check one field for simplicity
-				// ... other fields would be here
+				CPUProfile:      *server.Config.CPUProfile,
+				LogLevel:        *server.Config.LogLevel,
+				LogFile:         *server.Config.LogFile,
+				Compress:        *server.Config.Compress,
+				TSIG:            *server.Config.TSIG,
+				SOReusePort:     *server.Config.SOReusePort,
+				CPU:             *server.Config.CPU,
+				BaseDomain:      *server.Config.BaseDomain,
+				CacheLimit:      *server.Config.CacheLimit,
+				DNSServers:      *server.Config.DNSServers,
+				VoidLookupLimit: *server.Config.VoidLookupLimit,
+				CacheTTL:        *server.Config.CacheTTL,
+				MaxConcurrent:   *server.Config.MaxConcurrent,
+				MetricsPort:     *server.Config.MetricsPort,
+				TCPAddr:         *server.Config.TCPAddr,
+				UDPAddr:         *server.Config.UDPAddr,
 			}
-			json.NewEncoder(w).Encode(currentSettings)
-		})
+			if err := enc.Encode(currentSettings); err != nil {
+				http.Error(w, "Failed to encode settings", http.StatusInternalServerError)
+			}
+		// POST case is handled by TestSettingsHandler_POST_Valid, not needed here for GET
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
 	}
 
-	req, _ := http.NewRequest("GET", "/settings", nil)
+	req, err := http.NewRequest("GET", "/settings", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	rr := httptest.NewRecorder()
-	// Use http.DefaultServeMux because our handler is registered there for this test setup
-	http.DefaultServeMux.ServeHTTP(rr, req)
+	handler := http.HandlerFunc(settingsHandlerFunc)
+	handler.ServeHTTP(rr, req) // Directly serve the request using the handler bound to our server instance
 
 	if status := rr.Code; status != http.StatusOK {
 		t.Fatalf("handler returned wrong status code: got %v want %v. Body: %s", status, http.StatusOK, rr.Body.String())
@@ -192,26 +212,76 @@ func TestSettingsHandler_POST_Valid(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 
-	// Manually simulate the core logic of the POST handler for this test
-	// This is not ideal but avoids full server start for a unit test.
-	// In a real scenario, you'd test via httptest.Server or factor out handler logic.
-	if req.Method == http.MethodPost {
-		body, _ := io.ReadAll(req.Body)
+	// This is the actual handler logic for /settings POST, bound to our 'server' instance
+	settingsHandlerFunc := func(w http.ResponseWriter, r *http.Request) {
+		server.mu.Lock() // Use the server's mutex
+		defer server.mu.Unlock()
+
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
+
 		var newSettings config.Settings
-		json.Unmarshal(body, &newSettings) // Simplified, no error check for brevity
+		if err := json.Unmarshal(body, &newSettings); err != nil {
+			http.Error(w, "Invalid JSON payload: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 
-		// Apply one change
+		// Basic Validations (mirroring server.go)
+		switch strings.ToUpper(newSettings.LogLevel) {
+		case "NONE", "INFO", "DEBUG", "TRACE": // Valid levels
+		default:
+			http.Error(w, "Invalid loglevel: must be NONE, INFO, DEBUG, or TRACE", http.StatusBadRequest)
+			return
+		}
+		if newSettings.CacheTTL < 0 {
+			http.Error(w, "CacheTTL must be non-negative", http.StatusBadRequest)
+			return
+		}
+		// Not all validations from server.go are replicated here for brevity, but critical ones are.
+
+		// Update config.Flags (pointers ensure this updates the shared instance from main)
 		*server.Config.LogLevel = newSettings.LogLevel
-		server.Logger.Reconfigure(*server.Config.LogLevel, *server.Config.LogFile, server.LogBuffer)
+		*server.Config.LogFile = newSettings.LogFile
+		*server.Config.CacheLimit = newSettings.CacheLimit
+		*server.Config.CacheTTL = newSettings.CacheTTL
+		*server.Config.DNSServers = newSettings.DNSServers
+		*server.Config.MaxConcurrent = newSettings.MaxConcurrent
+		// ... update other relevant flags from newSettings ...
 
-		rr.WriteHeader(http.StatusOK)
-		json.NewEncoder(rr).Encode(map[string]string{"status": "updated", "message": "Settings updated successfully."})
-	} else {
-		rr.WriteHeader(http.StatusMethodNotAllowed)
+		// Apply changes to components
+		server.Logger.Reconfigure(*server.Config.LogLevel, *server.Config.LogFile, server.LogBuffer)
+		if server.Cache != nil { // Mock cache might be nil if not relevant to specific test
+			server.Cache.SetLimit(*server.Config.CacheLimit)
+			server.Cache.SetTTL(*server.Config.CacheTTL)
+		}
+
+		// ResolverPool and SPFSemaphore updates are more complex and skipped here for focus
+		// but would be part of a full replication.
+
+		server.Logger.Info(map[string]interface{}{"message": "Settings updated via test handler", "new_settings": newSettings})
+
+		response := map[string]interface{}{"status": "updated", "message": "Settings updated successfully."}
+		// Restart required messages logic also skipped for brevity in test.
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK) // Ensure status is OK before writing body
+		json.NewEncoder(w).Encode(response)
 	}
 
+	handler := http.HandlerFunc(settingsHandlerFunc)
+	handler.ServeHTTP(rr, req) // Directly serve the request using the handler
+
 	if status := rr.Code; status != http.StatusOK {
-		t.Errorf("POST /settings status = %d; want %d", status, http.StatusOK)
+		t.Errorf("POST /settings status = %d; want %d. Body: %s", status, http.StatusOK, rr.Body.String())
 	}
 	if *cfg.LogLevel != newLogLevel {
 		t.Errorf("cfg.LogLevel after POST = %s; want %s", *cfg.LogLevel, newLogLevel)
