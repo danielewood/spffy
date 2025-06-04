@@ -230,7 +230,6 @@ func TestExtractSPFComponents(t *testing.T) {
 
 func TestProcessDNSQuery(t *testing.T) {
 	// Helper to create a default handler with mocks
-	// Helper to create a default handler with mocks
 	createHandler := func(t *testing.T, cache *MockCache, logLevel logging.LogLevel, spfSemaphoreSize int) (*Handler, *MockLogger, *prometheus.CounterVec) {
 		cfg := &config.Flags{
 			BaseDomain:      new(string),
