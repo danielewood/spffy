@@ -217,7 +217,7 @@ func GetInitialSettings() *Flags {
 			// For testing, it's often better to use flag.NewFlagSet.
 			// However, to make GetInitialSettings callable multiple times using default flagset:
 			s, _ := fl.Value.(flag.Getter).Get().(string) // Get current value
-			return &s // Return pointer to a copy; not ideal as it won't update original
+			return &s                                     // Return pointer to a copy; not ideal as it won't update original
 		}
 		return flag.String(name, value, usage)
 	}
@@ -251,7 +251,6 @@ func GetInitialSettings() *Flags {
 		}
 		return flag.Uint(name, value, usage)
 	}
-
 
 	f.CPUProfile = defineStringFlag("cpuprofile", "", "write cpu profile to file")
 	f.LogLevel = defineStringFlag("loglevel", "INFO", "log level: NONE, INFO, DEBUG, TRACE")
@@ -313,6 +312,7 @@ func GetInitialSettings() *Flags {
 	LoadEnvConfig(f) // Load environment variables, potentially overriding defaults/flags
 	return f
 }
+
 // The following lines were erroneously outside the GetInitialSettings function.
 // They are part of flag.Usage which is correctly set inside the if !flag.Parsed() block.
 // This entire block of text from flag.PrintDefaults() down to LoadEnvConfig(f) and return f

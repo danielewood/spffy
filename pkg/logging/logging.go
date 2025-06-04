@@ -15,6 +15,8 @@ type LogLevel int
 
 const (
 	LevelNone LogLevel = iota
+	LevelError
+	LevelWarn
 	LevelInfo
 	LevelDebug
 	LevelTrace
@@ -25,6 +27,10 @@ func (l LogLevel) String() string {
 	switch l {
 	case LevelNone:
 		return "NONE"
+	case LevelError:
+		return "ERROR"
+	case LevelWarn:
+		return "WARN"
 	case LevelInfo:
 		return "INFO"
 	case LevelDebug:
@@ -116,6 +122,10 @@ func NewLogger(levelStr string, output string, buffer *LogBuffer) *Logger {
 	switch strings.ToUpper(levelStr) {
 	case "NONE":
 		level = LevelNone
+	case "ERROR":
+		level = LevelError
+	case "WARN":
+		level = LevelWarn
 	case "INFO":
 		level = LevelInfo
 	case "DEBUG":
@@ -149,6 +159,8 @@ func NewLogger(levelStr string, output string, buffer *LogBuffer) *Logger {
 
 // logMessage logs a message at the specified level with JSON formatting
 func (l *Logger) logMessage(level LogLevel, msg map[string]interface{}) {
+	// Log if the message level is less than or equal to the logger's level
+	// Hierarchy: ERROR > WARN > INFO > DEBUG > TRACE
 	if level > l.level {
 		return
 	}
@@ -170,6 +182,10 @@ func levelToString(level LogLevel) string {
 	switch level {
 	case LevelNone:
 		return "NONE"
+	case LevelError:
+		return "ERROR"
+	case LevelWarn:
+		return "WARN"
 	case LevelInfo:
 		return "INFO"
 	case LevelDebug:
@@ -196,6 +212,16 @@ func (l *Logger) Trace(msg map[string]interface{}) {
 	l.logMessage(LevelTrace, msg)
 }
 
+// Error logs at ERROR level
+func (l *Logger) Error(msg map[string]interface{}) {
+	l.logMessage(LevelError, msg)
+}
+
+// Warn logs at WARN level
+func (l *Logger) Warn(msg map[string]interface{}) {
+	l.logMessage(LevelWarn, msg)
+}
+
 // GetLevel returns the current logging level of the logger
 func (l *Logger) GetLevel() LogLevel {
 	return l.level
@@ -206,21 +232,22 @@ type LoggerInterface interface {
 	Info(msg map[string]interface{})
 	Debug(msg map[string]interface{})
 	Trace(msg map[string]interface{})
+	Error(msg map[string]interface{})
+	Warn(msg map[string]interface{})
 	GetLevel() LogLevel
-	Reconfigure(levelStr string, output string, buffer *LogBuffer) // Added for dynamic reconfiguration
+	Reconfigure(levelStr string, output string, buffer *LogBuffer)
 }
 
 // Reconfigure updates the logger's level and output destination.
-// Note: This creates a new underlying *log.Logger.
-// If the LogBuffer also needs to be changed, it's passed as a parameter.
 func (l *Logger) Reconfigure(levelStr string, output string, buffer *LogBuffer) {
-	// l.mu.Lock() // Logger currently doesn't have its own mutex, operations are on LogBuffer or are atomic writes to fields.
-	// defer l.mu.Unlock() // Add mutex to Logger if concurrent Reconfigure calls are expected or if fields need protection.
-
 	var newLevel LogLevel
 	switch strings.ToUpper(levelStr) {
 	case "NONE":
 		newLevel = LevelNone
+	case "ERROR":
+		newLevel = LevelError
+	case "WARN":
+		newLevel = LevelWarn
 	case "INFO":
 		newLevel = LevelInfo
 	case "DEBUG":
@@ -235,8 +262,6 @@ func (l *Logger) Reconfigure(levelStr string, output string, buffer *LogBuffer) 
 
 	var newWriter *log.Logger
 	if output != "" {
-		// TODO: Consider closing the old file if l.writer was writing to a file.
-		// This requires storing the *os.File handle in Logger.
 		f, err := os.OpenFile(output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to open new log file %s during reconfigure: %v. Using stdout.\n", output, err)
@@ -245,12 +270,11 @@ func (l *Logger) Reconfigure(levelStr string, output string, buffer *LogBuffer) 
 			newWriter = log.New(f, "", 0)
 		}
 	} else {
-		// TODO: Consider closing old file if switching from file to stdout.
 		newWriter = log.New(os.Stdout, "", 0)
 	}
 	l.writer = newWriter
 
-	if buffer != nil { // Allow updating the log buffer as well
+	if buffer != nil {
 		l.buffer = buffer
 	}
 }

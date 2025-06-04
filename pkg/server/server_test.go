@@ -8,6 +8,7 @@ import (
 	"net/http/httptest" // Was missing
 	"strings"
 	"testing"
+
 	// "time" // Removed as unused
 	// "net/url" // Removed as unused after refactoring
 
@@ -18,26 +19,42 @@ import (
 )
 
 // MockLogger for server tests
+// MockLogger for server tests
 type MockServerLogger struct {
 	InfoMessages  []map[string]interface{}
 	DebugMessages []map[string]interface{}
 	TraceMessages []map[string]interface{}
+	ErrorMessages []map[string]interface{} // Added for Error logs
+	WarnMessages  []map[string]interface{} // Added for Warn logs
 	Level         logging.LogLevel
 }
 
 func NewMockServerLogger(level logging.LogLevel) *MockServerLogger {
 	return &MockServerLogger{Level: level}
 }
+
 func (m *MockServerLogger) Info(msg map[string]interface{}) {
 	m.InfoMessages = append(m.InfoMessages, msg)
 }
+
 func (m *MockServerLogger) Debug(msg map[string]interface{}) {
 	m.DebugMessages = append(m.DebugMessages, msg)
 }
+
 func (m *MockServerLogger) Trace(msg map[string]interface{}) {
 	m.TraceMessages = append(m.TraceMessages, msg)
 }
+
+func (m *MockServerLogger) Error(msg map[string]interface{}) {
+	m.ErrorMessages = append(m.ErrorMessages, msg)
+}
+
+func (m *MockServerLogger) Warn(msg map[string]interface{}) {
+	m.WarnMessages = append(m.WarnMessages, msg)
+}
+
 func (m *MockServerLogger) GetLevel() logging.LogLevel { return m.Level }
+
 func (m *MockServerLogger) Reconfigure(levelStr string, output string, buffer *logging.LogBuffer) {
 	// Basic reconfiguration for mock
 	switch strings.ToUpper(levelStr) {
